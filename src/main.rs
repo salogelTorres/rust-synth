@@ -46,6 +46,7 @@ fn main() {
 
     // Configurar salida de audio
     let host = cpal::default_host();
+    println!("Usando host de audio: {}", host.id().name());
     
     // Listar dispositivos de salida disponibles
     println!("\nDispositivos de salida disponibles:");
