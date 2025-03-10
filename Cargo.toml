@@ -1,0 +1,9 @@
+[package]
+name = "rust-synth"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+midir = "0.9"
+cpal = "0.15"
+fundsp = "0.13"
