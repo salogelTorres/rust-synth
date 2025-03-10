@@ -3,6 +3,7 @@ use midir::MidiInput;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 use std::time::Duration;
+use std::io;
 
 fn main() {
     // Frecuencia actual y estado de nota
@@ -47,8 +48,34 @@ fn main() {
 
     // Configurar salida de audio
     let host = cpal::default_host();
-    let device = host.default_output_device().unwrap();
+    
+    // Listar dispositivos de salida disponibles
+    println!("\nDispositivos de salida disponibles:");
+    let output_devices = host.output_devices()
+        .expect("Error al obtener dispositivos de salida");
+    
+    let mut devices_vec = Vec::new();
+    for (idx, device) in output_devices.enumerate() {
+        println!("{}. {}", idx, device.name().unwrap_or_else(|_| "Nombre desconocido".into()));
+        devices_vec.push(device);
+    }
+
+    println!("\nSelecciona un dispositivo (0-{}): ", devices_vec.len() - 1);
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input).unwrap();
+    let device_index: usize = input.trim().parse().unwrap_or(0);
+    
+    let device = devices_vec.get(device_index).cloned().unwrap_or_else(|| {
+        println!("Índice inválido, usando dispositivo por defecto");
+        host.default_output_device()
+            .expect("No se encontró dispositivo de audio")
+    });
+
+    println!("Usando host de audio: {}", host.id().name());
+    println!("Dispositivo de salida: {}", device.name().unwrap());
+
     let config = device.default_output_config().unwrap();
+    println!("Configuración por defecto: {:?}", config);
     
     let sample_rate = config.sample_rate().0 as f32;
     let mut sample_clock = 0f32;
