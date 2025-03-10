@@ -3,12 +3,97 @@ use midir::MidiInput;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 use std::time::Duration;
-use std::collections::HashSet;
+use std::collections::{HashSet, HashMap};
 use std::sync::Mutex;
+use std::io;
+
+struct Envelope {
+    attack: f32,
+    decay: f32,
+    sustain: f32,
+    release: f32,
+    current_amplitude: f32,
+    state: EnvelopeState,
+    sample_rate: f32,
+}
+
+#[derive(PartialEq)]
+enum EnvelopeState {
+    Attack,
+    Decay,
+    Sustain,
+    Release,
+    Off,
+}
+
+impl Envelope {
+    fn new(sample_rate: f32) -> Self {
+        Envelope {
+            attack: 0.005,  // 5ms para el ataque
+            decay: 0.05,    // 50ms para el decay
+            sustain: 0.7,   // nivel de sustain
+            release: 0.05,  // 50ms para el release
+            current_amplitude: 0.0,
+            state: EnvelopeState::Off,
+            sample_rate,
+        }
+    }
+
+    fn next_sample(&mut self) -> f32 {
+        let attack_samples = self.attack * self.sample_rate;
+        let decay_samples = self.decay * self.sample_rate;
+        let release_samples = self.release * self.sample_rate;
+
+        match self.state {
+            EnvelopeState::Attack => {
+                self.current_amplitude += 1.0 / attack_samples;
+                if self.current_amplitude >= 1.0 {
+                    self.current_amplitude = 1.0;
+                    self.state = EnvelopeState::Decay;
+                }
+            }
+            EnvelopeState::Decay => {
+                self.current_amplitude -= (1.0 - self.sustain) / decay_samples;
+                if self.current_amplitude <= self.sustain {
+                    self.current_amplitude = self.sustain;
+                    self.state = EnvelopeState::Sustain;
+                }
+            }
+            EnvelopeState::Sustain => {
+                // Mantener el nivel de sustain
+            }
+            EnvelopeState::Release => {
+                self.current_amplitude -= self.sustain / release_samples;
+                if self.current_amplitude <= 0.0 {
+                    self.current_amplitude = 0.0;
+                    self.state = EnvelopeState::Off;
+                }
+            }
+            EnvelopeState::Off => {
+                self.current_amplitude = 0.0;
+            }
+        }
+        self.current_amplitude
+    }
+
+    fn note_on(&mut self) {
+        self.state = EnvelopeState::Attack;
+    }
+
+    fn note_off(&mut self) {
+        self.state = EnvelopeState::Release;
+    }
+}
+
+struct Note {
+    frequency: f32,
+    envelope: Envelope,
+    phase: f32,  // Añadir tracking de fase
+}
 
 fn main() {
-    // Conjunto de notas activas
-    let active_notes = Arc::new(Mutex::new(HashSet::new()));
+    // Reemplazar el HashSet por un HashMap
+    let active_notes = Arc::new(Mutex::new(HashMap::new()));
     
     // Configurar entrada MIDI
     let midi_in = MidiInput::new("rust-synth").unwrap();
@@ -20,6 +105,12 @@ fn main() {
     }
 
     let notes_for_audio = active_notes.clone();
+
+    // Get sample rate before MIDI callback
+    let host = cpal::default_host();
+    let device = host.default_output_device().expect("No se encontró dispositivo de audio");
+    let config = device.default_output_config().unwrap();
+    let sample_rate = config.sample_rate().0 as f32;
     
     // Callback para mensajes MIDI
     let _midi_connection = midi_in.connect(&ports[0], "midi-read", move |_timestamp, message, _| {
@@ -30,14 +121,25 @@ fn main() {
                     let note = message[1];
                     let velocity = message[2];
                     if velocity > 0 {
-                        notes.insert(note);
+                        let freq = midi_note_to_freq(note);
+                        let mut envelope = Envelope::new(sample_rate);
+                        envelope.note_on();
+                        notes.insert(note, Note {
+                            frequency: freq,
+                            envelope,
+                            phase: 0.0,  // Inicializar fase
+                        });
                     } else {
-                        notes.remove(&note);
+                        if let Some(note_data) = notes.get_mut(&note) {
+                            note_data.envelope.note_off();
+                        }
                     }
                 },
                 0x80 => { // Note Off
                     let note = message[1];
-                    notes.remove(&note);
+                    if let Some(note_data) = notes.get_mut(&note) {
+                        note_data.envelope.note_off();
+                    }
                 },
                 _ => (),
             }
@@ -45,7 +147,6 @@ fn main() {
     }, ()).unwrap();
 
     // Configurar salida de audio
-    let host = cpal::default_host();
     println!("Usando host de audio: {}", host.id().name());
     
     // Listar dispositivos de salida disponibles
@@ -76,28 +177,49 @@ fn main() {
     let config = device.default_output_config().unwrap();
     println!("Configuración por defecto: {:?}", config);
     
-    let sample_rate = config.sample_rate().0 as f32;
+    // Crear una configuración personalizada con buffer más pequeño
+    let config_type = config.sample_format();
+    let config = cpal::StreamConfig {
+        channels: config.channels(),
+        sample_rate: config.sample_rate(),
+        buffer_size: cpal::BufferSize::Fixed(512), // Reducido a 512
+    };
+    
+    println!("Configuración optimizada: {:?}", config);
+    
     let mut sample_clock = 0f32;
     
     let stream = device.build_output_stream(
-        &config.into(),
+        &config,
         move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+            let mut notes = notes_for_audio.lock().unwrap();
+            
+            // Remove finished notes first
+            notes.retain(|_, note| note.envelope.state != EnvelopeState::Off);
+            
             for sample in data.iter_mut() {
-                let notes = notes_for_audio.lock().unwrap();
                 *sample = 0.0;
-                for &note in notes.iter() {
-                    let freq = midi_note_to_freq(note);
-                    *sample += (2.0 * std::f32::consts::PI * freq * sample_clock / sample_rate).sin() * 0.5;
+                
+                // Process active notes
+                for (_note_id, note) in notes.iter_mut() {
+                    let envelope_amp = note.envelope.next_sample();
+                    
+                    // Actualizar fase
+                    note.phase += 2.0 * std::f32::consts::PI * note.frequency / sample_rate;
+                    if note.phase > 2.0 * std::f32::consts::PI {
+                        note.phase -= 2.0 * std::f32::consts::PI;
+                    }
+                    
+                    // Añadir la contribución de esta nota
+                    *sample += note.phase.sin() * envelope_amp * 0.15; // Reducida la amplitud base
                 }
-                // Normalizar la amplitud dividiendo por el número de notas activas
-                if !notes.is_empty() {
-                    *sample /= notes.len() as f32;
-                }
-                sample_clock += 1.0;
+                
+                // Aplicar limitador suave
+                *sample = soft_clip(*sample);
             }
         },
         |err| eprintln!("Error en el stream: {}", err),
-        Some(Duration::from_secs(1))
+        Some(Duration::from_millis(100))
     ).unwrap();
 
     stream.play().unwrap();
@@ -108,4 +230,14 @@ fn main() {
 
 fn midi_note_to_freq(note: u8) -> f32 {
     440.0 * 2.0_f32.powf((note as f32 - 69.0) / 12.0)
+}
+
+fn soft_clip(x: f32) -> f32 {
+    if x > 1.0 {
+        1.0 - (-1.0 * (x - 1.0)).exp()
+    } else if x < -1.0 {
+        -1.0 + (-1.0 * (-x - 1.0)).exp()
+    } else {
+        x
+    }
 }
