@@ -3,12 +3,12 @@ use midir::MidiInput;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 use std::time::Duration;
-use std::io;
+use std::collections::HashSet;
+use std::sync::Mutex;
 
 fn main() {
-    // Frecuencia actual y estado de nota
-    let current_freq = Arc::new(AtomicU64::new(440_0000));
-    let note_on = Arc::new(AtomicBool::new(false));
+    // Conjunto de notas activas
+    let active_notes = Arc::new(Mutex::new(HashSet::new()));
     
     // Configurar entrada MIDI
     let midi_in = MidiInput::new("rust-synth").unwrap();
@@ -19,27 +19,25 @@ fn main() {
         return;
     }
 
-    let freq_for_audio = current_freq.clone();
-    let note_on_for_audio = note_on.clone();
+    let notes_for_audio = active_notes.clone();
     
     // Callback para mensajes MIDI
     let _midi_connection = midi_in.connect(&ports[0], "midi-read", move |_timestamp, message, _| {
         if message.len() == 3 {
+            let mut notes = active_notes.lock().unwrap();
             match message[0] {
                 0x90 => { // Note On
                     let note = message[1];
                     let velocity = message[2];
                     if velocity > 0 {
-                        let freq = midi_note_to_freq(note);
-                        current_freq.store((freq * 10000.0) as u64, Ordering::Relaxed);
-                        note_on.store(true, Ordering::Relaxed);
+                        notes.insert(note);
                     } else {
-                        // Note On con velocidad 0 es equivalente a Note Off
-                        note_on.store(false, Ordering::Relaxed);
+                        notes.remove(&note);
                     }
                 },
                 0x80 => { // Note Off
-                    note_on.store(false, Ordering::Relaxed);
+                    let note = message[1];
+                    notes.remove(&note);
                 },
                 _ => (),
             }
@@ -84,12 +82,16 @@ fn main() {
         &config.into(),
         move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
             for sample in data.iter_mut() {
-                let freq = freq_for_audio.load(Ordering::Relaxed) as f32 / 10000.0;
-                *sample = if note_on_for_audio.load(Ordering::Relaxed) {
-                    (2.0 * std::f32::consts::PI * freq * sample_clock / sample_rate).sin() * 0.5
-                } else {
-                    0.0
-                };
+                let notes = notes_for_audio.lock().unwrap();
+                *sample = 0.0;
+                for &note in notes.iter() {
+                    let freq = midi_note_to_freq(note);
+                    *sample += (2.0 * std::f32::consts::PI * freq * sample_clock / sample_rate).sin() * 0.5;
+                }
+                // Normalizar la amplitud dividiendo por el número de notas activas
+                if !notes.is_empty() {
+                    *sample /= notes.len() as f32;
+                }
                 sample_clock += 1.0;
             }
         },
