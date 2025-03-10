@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 use std::time::Duration;
 use std::collections::{HashSet, HashMap};
-use std::sync::Mutex;
+use std::sync::{Mutex, Condvar};
 use std::io;
 
 struct Envelope {
@@ -29,10 +29,10 @@ enum EnvelopeState {
 impl Envelope {
     fn new(sample_rate: f32) -> Self {
         Envelope {
-            attack: 0.005,  // 5ms para el ataque
-            decay: 0.05,    // 50ms para el decay
-            sustain: 0.7,   // nivel de sustain
-            release: 0.05,  // 50ms para el release
+            attack: 0.005,
+            decay: 0.05,
+            sustain: 0.7,
+            release: 0.05,
             current_amplitude: 0.0,
             state: EnvelopeState::Off,
             sample_rate,
@@ -182,7 +182,7 @@ fn main() {
     let config = cpal::StreamConfig {
         channels: config.channels(),
         sample_rate: config.sample_rate(),
-        buffer_size: cpal::BufferSize::Fixed(512), // Reducido a 512
+        buffer_size: cpal::BufferSize::Fixed(512),  // Volvemos a 512 para estabilidad
     };
     
     println!("Configuración optimizada: {:?}", config);
@@ -194,29 +194,26 @@ fn main() {
         move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
             let mut notes = notes_for_audio.lock().unwrap();
             
-            // Remove finished notes first
-            notes.retain(|_, note| note.envelope.state != EnvelopeState::Off);
-            
             for sample in data.iter_mut() {
                 *sample = 0.0;
                 
-                // Process active notes
-                for (_note_id, note) in notes.iter_mut() {
+                // Process each note directly
+                for note in notes.values_mut() {
                     let envelope_amp = note.envelope.next_sample();
                     
-                    // Actualizar fase
                     note.phase += 2.0 * std::f32::consts::PI * note.frequency / sample_rate;
-                    if note.phase > 2.0 * std::f32::consts::PI {
+                    while note.phase >= 2.0 * std::f32::consts::PI {
                         note.phase -= 2.0 * std::f32::consts::PI;
                     }
                     
-                    // Añadir la contribución de esta nota
-                    *sample += note.phase.sin() * envelope_amp * 0.15; // Reducida la amplitud base
+                    *sample += note.phase.sin() * envelope_amp * 0.15;
                 }
                 
-                // Aplicar limitador suave
                 *sample = soft_clip(*sample);
             }
+            
+            // Clean up finished notes after processing
+            notes.retain(|_, note| note.envelope.state != EnvelopeState::Off);
         },
         |err| eprintln!("Error en el stream: {}", err),
         Some(Duration::from_millis(100))
@@ -224,8 +221,22 @@ fn main() {
 
     stream.play().unwrap();
 
-    // Mantener el programa corriendo
-    std::thread::sleep(std::time::Duration::from_secs(3600));
+    // Mantener el programa corriendo de forma más eficiente
+    let running = Arc::new((Mutex::new(true), Condvar::new()));
+    let r = running.clone();
+    
+    ctrlc::set_handler(move || {
+        let (lock, cvar) = &*r;
+        let mut running = lock.lock().unwrap();
+        *running = false;
+        cvar.notify_one();
+    }).expect("Error setting Ctrl-C handler");
+
+    let (lock, cvar) = &*running;
+    let mut running = lock.lock().unwrap();
+    while *running {
+        running = cvar.wait(running).unwrap();
+    }
 }
 
 fn midi_note_to_freq(note: u8) -> f32 {
