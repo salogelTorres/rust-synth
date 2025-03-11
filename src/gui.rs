@@ -39,7 +39,10 @@ pub struct SynthConfig {
     pub selected_config: Option<cpal::SupportedStreamConfig>,
     pub running: bool,
     pub volume: Arc<Mutex<f32>>,
-    pub wave_type: Arc<Mutex<WaveType>>,
+    pub wave_type1: Arc<Mutex<WaveType>>,
+    pub wave_type2: Arc<Mutex<WaveType>>,
+    pub osc2_volume: Arc<Mutex<f32>>,
+    pub osc2_detune: Arc<Mutex<f32>>,
 }
 
 impl Default for SynthConfig {
@@ -53,8 +56,11 @@ impl Default for SynthConfig {
             available_sample_rates: Vec::new(),
             selected_config: None,
             running: false,
-            volume: Arc::new(Mutex::new(0.15)),
-            wave_type: Arc::new(Mutex::new(WaveType::Sine)),
+            volume: Arc::new(Mutex::new(0.5)),
+            wave_type1: Arc::new(Mutex::new(WaveType::Sine)),
+            wave_type2: Arc::new(Mutex::new(WaveType::Sine)),
+            osc2_volume: Arc::new(Mutex::new(0.5)),
+            osc2_detune: Arc::new(Mutex::new(0.0)),
         }
     }
 }
@@ -253,6 +259,10 @@ impl SynthApp {
         let host_index;
         let device_index;
         let volume;
+        let wave_type1;
+        let wave_type2;
+        let osc2_volume;
+        let osc2_detune;
         
         {
             let config = self.config.lock().unwrap();
@@ -264,6 +274,10 @@ impl SynthApp {
             host_index = config.host_index;
             device_index = config.device_index;
             volume = config.volume.clone();
+            wave_type1 = config.wave_type1.clone();
+            wave_type2 = config.wave_type2.clone();
+            osc2_volume = config.osc2_volume.clone();
+            osc2_detune = config.osc2_detune.clone();
         }
         
         // Obtener el host seleccionado
@@ -322,10 +336,12 @@ impl SynthApp {
             cpal::SampleFormat::I32 => device.build_output_stream(
                 &stream_config,
                 move |data: &mut [i32], _: &cpal::OutputCallbackInfo| {
-                    // Adquirir el bloqueo una vez por buffer en lugar de por muestra
+                    // Adquirir el bloqueo una vez por buffer
                     let mut notes_guard = active_notes.lock().unwrap();
                     let current_sample_rate = *sample_rate_shared.lock().unwrap();
                     let current_volume = *volume.lock().unwrap();
+                    let current_osc2_volume = *osc2_volume.lock().unwrap();
+                    let current_osc2_detune = *osc2_detune.lock().unwrap();
                     
                     // Actualizar las frecuencias de muestreo si es necesario
                     for note in notes_guard.values_mut() {
@@ -333,11 +349,13 @@ impl SynthApp {
                             note.sample_rate = current_sample_rate;
                             note.update_frequency(note.frequency);
                         }
+                        note.osc2.volume = current_osc2_volume;
+                        note.osc2.detune = current_osc2_detune;
                     }
                     
                     let channels = stream_config.channels as usize;
                     
-                    // Procesar el audio en bloques para mejorar la eficiencia
+                    // Procesar el audio en bloques
                     for chunk in data.chunks_mut(channels * BUFFER_SIZE).filter(|c| !c.is_empty()) {
                         // Generar un buffer temporal de muestras
                         let mut temp_buffer = [0.0f32; BUFFER_SIZE];
@@ -350,11 +368,11 @@ impl SynthApp {
                                     
                                     for note in notes_guard.values_mut() {
                                         let envelope_amp = note.envelope.next_sample();
-                                        let sine_value = note.get_sample();
-                                        mix += sine_value * envelope_amp * current_volume;
+                                        let sample = note.get_sample();
+                                        mix += sample * envelope_amp * current_volume;
                                     }
                                     
-                                    // Aplicar soft clip y convertir a i32
+                                    // Aplicar soft clip
                                     temp_buffer[i] = crate::audio::soft_clip(mix);
                                     (temp_buffer[i] * i32::MAX as f32) as i32
                                 };
@@ -376,10 +394,12 @@ impl SynthApp {
             _ => device.build_output_stream(
                 &stream_config,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    // Adquirir el bloqueo una vez por buffer en lugar de por muestra
+                    // Adquirir el bloqueo una vez por buffer
                     let mut notes_guard = active_notes.lock().unwrap();
                     let current_sample_rate = *sample_rate_shared.lock().unwrap();
                     let current_volume = *volume.lock().unwrap();
+                    let current_osc2_volume = *osc2_volume.lock().unwrap();
+                    let current_osc2_detune = *osc2_detune.lock().unwrap();
                     
                     // Actualizar las frecuencias de muestreo si es necesario
                     for note in notes_guard.values_mut() {
@@ -387,11 +407,13 @@ impl SynthApp {
                             note.sample_rate = current_sample_rate;
                             note.update_frequency(note.frequency);
                         }
+                        note.osc2.volume = current_osc2_volume;
+                        note.osc2.detune = current_osc2_detune;
                     }
                     
                     let channels = stream_config.channels as usize;
                     
-                    // Procesar el audio en bloques para mejorar la eficiencia
+                    // Procesar el audio en bloques
                     for chunk in data.chunks_mut(channels * BUFFER_SIZE).filter(|c| !c.is_empty()) {
                         // Generar un buffer temporal de muestras
                         let mut temp_buffer = [0.0f32; BUFFER_SIZE];
@@ -404,8 +426,8 @@ impl SynthApp {
                                     
                                     for note in notes_guard.values_mut() {
                                         let envelope_amp = note.envelope.next_sample();
-                                        let sine_value = note.get_sample();
-                                        mix += sine_value * envelope_amp * current_volume;
+                                        let sample = note.get_sample();
+                                        mix += sample * envelope_amp * current_volume;
                                     }
                                     
                                     // Aplicar soft clip
@@ -470,14 +492,20 @@ impl SynthApp {
         // Clonar referencias para el callback
         let active_notes = self.active_notes.clone();
         let sample_rate_for_midi = self.sample_rate.clone();
-        let wave_type = self.config.lock().unwrap().wave_type.clone();
+        let wave_type1 = self.config.lock().unwrap().wave_type1.clone();
+        let wave_type2 = self.config.lock().unwrap().wave_type2.clone();
+        let osc2_volume = self.config.lock().unwrap().osc2_volume.clone();
+        let osc2_detune = self.config.lock().unwrap().osc2_detune.clone();
         
         // Conectar al primer puerto MIDI disponible
         let midi_connection = midi_in.connect(&ports[0], "midi-read", move |_timestamp, message, _| {
             if message.len() == 3 {
                 let mut notes = active_notes.lock().unwrap();
                 let current_sample_rate = *sample_rate_for_midi.lock().unwrap();
-                let current_wave_type = *wave_type.lock().unwrap();
+                let current_wave_type1 = *wave_type1.lock().unwrap();
+                let current_wave_type2 = *wave_type2.lock().unwrap();
+                let current_osc2_volume = *osc2_volume.lock().unwrap();
+                let current_osc2_detune = *osc2_detune.lock().unwrap();
                 
                 match message[0] {
                     0x90 => { // Note On
@@ -489,8 +517,12 @@ impl SynthApp {
                             let mut envelope = Envelope::new(current_sample_rate);
                             envelope.set_adsr(0.01, 0.1, 0.7, 0.3);
                             envelope.set_velocity(velocity);
-                            envelope.note_on(); // Asegurarse de que la envolvente se inicie
-                            notes.insert(note, Note::new(freq, envelope, current_sample_rate, current_wave_type));
+                            envelope.note_on();
+                            
+                            let mut new_note = Note::new(freq, envelope, current_sample_rate, current_wave_type1, current_wave_type2);
+                            new_note.osc2.volume = current_osc2_volume;
+                            new_note.osc2.detune = current_osc2_detune;
+                            notes.insert(note, new_note);
                         } else {
                             println!("Nota OFF (velocity 0) - Número: {}", note);
                             if let Some(note_data) = notes.get_mut(&note) {
@@ -542,7 +574,8 @@ impl eframe::App for SynthApp {
                 let device_text;
                 let rate_text;
                 let volume;
-                let wave_type;
+                let wave_type1;
+                let wave_type2;
                 let available_hosts;
                 let available_devices;
                 let available_sample_rates;
@@ -560,7 +593,8 @@ impl eframe::App for SynthApp {
                         .map(|rate| format!("{} Hz", rate))
                         .unwrap_or_else(|| "Ninguna".to_string());
                     volume = config.volume.clone();
-                    wave_type = config.wave_type.clone();
+                    wave_type1 = config.wave_type1.clone();
+                    wave_type2 = config.wave_type2.clone();
                     
                     // Clonar las colecciones para evitar problemas de préstamo
                     available_hosts = config.available_hosts.clone();
@@ -648,64 +682,149 @@ impl eframe::App for SynthApp {
             // Control de volumen y forma de onda en una sección separada
             ui.group(|ui| {
                 ui.heading("Controles de Sonido");
-                ui.horizontal(|ui| {
-                    // Control de volumen
-                    ui.vertical(|ui| {
-                        ui.label("Volumen");
-                        let mut volume_value = *self.config.lock().unwrap().volume.lock().unwrap();
-                        let volume_response = ui.add(egui::widgets::Slider::new(&mut volume_value, 0.0..=1.0)
-                            .show_value(true)
-                            .text(""));
-                        if volume_response.changed() {
-                            *self.config.lock().unwrap().volume.lock().unwrap() = volume_value;
-                            println!("Volumen: {}", volume_value);
-                        }
+                
+                // Oscilador 1
+                ui.group(|ui| {
+                    ui.heading("Oscilador 1");
+                    ui.horizontal(|ui| {
+                        // Control de volumen
+                        ui.vertical(|ui| {
+                            ui.label("Volumen");
+                            let mut volume_value = *self.config.lock().unwrap().volume.lock().unwrap();
+                            let volume_response = ui.add(egui::widgets::Slider::new(&mut volume_value, 0.0..=1.0)
+                                .show_value(true)
+                                .text(""));
+                            if volume_response.changed() {
+                                *self.config.lock().unwrap().volume.lock().unwrap() = volume_value;
+                            }
+                        });
+
+                        ui.add_space(20.0);
+
+                        // Control de tipo de onda
+                        ui.vertical(|ui| {
+                            ui.label("Tipo de Onda");
+                            ui.horizontal(|ui| {
+                                let button_size = egui::vec2(40.0, 40.0);
+                                let mut current_wave = *self.config.lock().unwrap().wave_type1.lock().unwrap();
+                                
+                                // Botón Sine
+                                let sine_response = ui.add(egui::Button::new("")
+                                    .min_size(button_size)
+                                    .selected(current_wave == WaveType::Sine));
+                                if sine_response.clicked() {
+                                    *self.config.lock().unwrap().wave_type1.lock().unwrap() = WaveType::Sine;
+                                }
+                                draw_sine_wave(ui.painter(), sine_response.rect, current_wave == WaveType::Sine);
+
+                                // Botón Square
+                                let square_response = ui.add(egui::Button::new("")
+                                    .min_size(button_size)
+                                    .selected(current_wave == WaveType::Square));
+                                if square_response.clicked() {
+                                    *self.config.lock().unwrap().wave_type1.lock().unwrap() = WaveType::Square;
+                                }
+                                draw_square_wave(ui.painter(), square_response.rect, current_wave == WaveType::Square);
+
+                                // Botón Triangle
+                                let triangle_response = ui.add(egui::Button::new("")
+                                    .min_size(button_size)
+                                    .selected(current_wave == WaveType::Triangle));
+                                if triangle_response.clicked() {
+                                    *self.config.lock().unwrap().wave_type1.lock().unwrap() = WaveType::Triangle;
+                                }
+                                draw_triangle_wave(ui.painter(), triangle_response.rect, current_wave == WaveType::Triangle);
+
+                                // Botón Sawtooth
+                                let saw_response = ui.add(egui::Button::new("")
+                                    .min_size(button_size)
+                                    .selected(current_wave == WaveType::Sawtooth));
+                                if saw_response.clicked() {
+                                    *self.config.lock().unwrap().wave_type1.lock().unwrap() = WaveType::Sawtooth;
+                                }
+                                draw_sawtooth_wave(ui.painter(), saw_response.rect, current_wave == WaveType::Sawtooth);
+                            });
+                        });
                     });
+                });
 
-                    ui.add_space(20.0);
+                ui.add_space(10.0);
 
-                    // Control de tipo de onda con botones visuales
-                    ui.vertical(|ui| {
-                        ui.label("Tipo de Onda");
-                        ui.horizontal(|ui| {
-                            let button_size = egui::vec2(50.0, 50.0);
-                            let mut current_wave = *self.config.lock().unwrap().wave_type.lock().unwrap();
-                            
-                            // Botón Sine
-                            let sine_response = ui.add(egui::Button::new("")
-                                .min_size(button_size)
-                                .selected(current_wave == WaveType::Sine));
-                            if sine_response.clicked() {
-                                *self.config.lock().unwrap().wave_type.lock().unwrap() = WaveType::Sine;
+                // Oscilador 2
+                ui.group(|ui| {
+                    ui.heading("Oscilador 2");
+                    ui.horizontal(|ui| {
+                        // Control de volumen
+                        ui.vertical(|ui| {
+                            ui.label("Volumen");
+                            let mut volume_value = *self.config.lock().unwrap().osc2_volume.lock().unwrap();
+                            let volume_response = ui.add(egui::widgets::Slider::new(&mut volume_value, 0.0..=1.0)
+                                .show_value(true)
+                                .text(""));
+                            if volume_response.changed() {
+                                *self.config.lock().unwrap().osc2_volume.lock().unwrap() = volume_value;
                             }
-                            draw_sine_wave(ui.painter(), sine_response.rect, current_wave == WaveType::Sine);
+                        });
 
-                            // Botón Square
-                            let square_response = ui.add(egui::Button::new("")
-                                .min_size(button_size)
-                                .selected(current_wave == WaveType::Square));
-                            if square_response.clicked() {
-                                *self.config.lock().unwrap().wave_type.lock().unwrap() = WaveType::Square;
-                            }
-                            draw_square_wave(ui.painter(), square_response.rect, current_wave == WaveType::Square);
+                        ui.add_space(20.0);
 
-                            // Botón Triangle
-                            let triangle_response = ui.add(egui::Button::new("")
-                                .min_size(button_size)
-                                .selected(current_wave == WaveType::Triangle));
-                            if triangle_response.clicked() {
-                                *self.config.lock().unwrap().wave_type.lock().unwrap() = WaveType::Triangle;
+                        // Control de detune
+                        ui.vertical(|ui| {
+                            ui.label("Detune (semitonos)");
+                            let mut detune_value = *self.config.lock().unwrap().osc2_detune.lock().unwrap();
+                            let detune_response = ui.add(egui::widgets::Slider::new(&mut detune_value, -12.0..=12.0)
+                                .show_value(true)
+                                .text(""));
+                            if detune_response.changed() {
+                                *self.config.lock().unwrap().osc2_detune.lock().unwrap() = detune_value;
                             }
-                            draw_triangle_wave(ui.painter(), triangle_response.rect, current_wave == WaveType::Triangle);
+                        });
 
-                            // Botón Sawtooth
-                            let saw_response = ui.add(egui::Button::new("")
-                                .min_size(button_size)
-                                .selected(current_wave == WaveType::Sawtooth));
-                            if saw_response.clicked() {
-                                *self.config.lock().unwrap().wave_type.lock().unwrap() = WaveType::Sawtooth;
-                            }
-                            draw_sawtooth_wave(ui.painter(), saw_response.rect, current_wave == WaveType::Sawtooth);
+                        ui.add_space(20.0);
+
+                        // Control de tipo de onda
+                        ui.vertical(|ui| {
+                            ui.label("Tipo de Onda");
+                            ui.horizontal(|ui| {
+                                let button_size = egui::vec2(40.0, 40.0);
+                                let mut current_wave = *self.config.lock().unwrap().wave_type2.lock().unwrap();
+                                
+                                // Botón Sine
+                                let sine_response = ui.add(egui::Button::new("")
+                                    .min_size(button_size)
+                                    .selected(current_wave == WaveType::Sine));
+                                if sine_response.clicked() {
+                                    *self.config.lock().unwrap().wave_type2.lock().unwrap() = WaveType::Sine;
+                                }
+                                draw_sine_wave(ui.painter(), sine_response.rect, current_wave == WaveType::Sine);
+
+                                // Botón Square
+                                let square_response = ui.add(egui::Button::new("")
+                                    .min_size(button_size)
+                                    .selected(current_wave == WaveType::Square));
+                                if square_response.clicked() {
+                                    *self.config.lock().unwrap().wave_type2.lock().unwrap() = WaveType::Square;
+                                }
+                                draw_square_wave(ui.painter(), square_response.rect, current_wave == WaveType::Square);
+
+                                // Botón Triangle
+                                let triangle_response = ui.add(egui::Button::new("")
+                                    .min_size(button_size)
+                                    .selected(current_wave == WaveType::Triangle));
+                                if triangle_response.clicked() {
+                                    *self.config.lock().unwrap().wave_type2.lock().unwrap() = WaveType::Triangle;
+                                }
+                                draw_triangle_wave(ui.painter(), triangle_response.rect, current_wave == WaveType::Triangle);
+
+                                // Botón Sawtooth
+                                let saw_response = ui.add(egui::Button::new("")
+                                    .min_size(button_size)
+                                    .selected(current_wave == WaveType::Sawtooth));
+                                if saw_response.clicked() {
+                                    *self.config.lock().unwrap().wave_type2.lock().unwrap() = WaveType::Sawtooth;
+                                }
+                                draw_sawtooth_wave(ui.painter(), saw_response.rect, current_wave == WaveType::Sawtooth);
+                            });
                         });
                     });
                 });

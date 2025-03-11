@@ -127,10 +127,12 @@ fn run_console_version() {
                     let velocity = message[2] as f32 / 127.0;
                     if velocity > 0.0 {
                         let freq = midi_note_to_freq(note);
+                        println!("Nota MIDI {} -> Frecuencia {} Hz", note, freq);
                         let mut envelope = Envelope::new(current_sample_rate);
                         envelope.set_adsr(0.01, 0.1, 0.7, 0.3);
                         envelope.set_velocity(velocity);
-                        notes.insert(note, Note::new(freq, envelope, current_sample_rate, current_wave_type));
+                        envelope.note_on();
+                        notes.insert(note, Note::new(freq, envelope, current_sample_rate, current_wave_type, current_wave_type));
                     } else {
                         if let Some(note_data) = notes.get_mut(&note) {
                             note_data.envelope.note_off();
@@ -395,7 +397,7 @@ fn handle_midi_message(msg: &[u8], active_notes: Arc<Mutex<HashMap<u8, Note>>>, 
                 envelope.set_adsr(0.01, 0.1, 0.7, 0.3);
                 envelope.set_velocity(velocity);
                 let current_wave_type = *wave_type.lock().unwrap();
-                let new_note = Note::new(freq, envelope, *sample_rate.lock().unwrap(), current_wave_type);
+                let new_note = Note::new(freq, envelope, *sample_rate.lock().unwrap(), current_wave_type, current_wave_type);
                 active_notes.lock().unwrap().insert(note, new_note);
             } else {
                 if let Some(note) = active_notes.lock().unwrap().get_mut(&note) {

@@ -22,7 +22,7 @@ Un sintetizador de audio escrito en Rust con soporte para MIDI y una interfaz gr
 
 1. Clona este repositorio:
    ```
-   git clone https://github.com/tu-usuario/rust-synth.git
+   git clone https://github.com/salogelTorres/rust-synth.git
    cd rust-synth
    ```
 
