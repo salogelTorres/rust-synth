@@ -1,11 +1,9 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use midir::MidiInput;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 use std::time::Duration;
-use std::collections::{HashSet, HashMap};
+use std::collections::{HashMap};
 use std::sync::{Mutex, Condvar};
-use std::io;
 
 struct Envelope {
     attack: f32,
@@ -106,8 +104,29 @@ fn main() {
 
     let notes_for_audio = active_notes.clone();
 
+    // Listar hosts de audio disponibles
+    println!("\nHosts de audio disponibles:");
+    let available_hosts = cpal::available_hosts();
+    for (idx, host_id) in available_hosts.iter().enumerate() {
+        println!("{}. {}", idx, host_id.name());
+    }
+
+    println!("\nSelecciona un host (0-{}): ", available_hosts.len() - 1);
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input).unwrap();
+    let host_index: usize = input.trim().parse().unwrap_or(0);
+
+    let host = if host_index < available_hosts.len() {
+        cpal::host_from_id(available_hosts[host_index])
+            .expect("Error al crear el host")
+    } else {
+        println!("Índice inválido, usando host por defecto");
+        cpal::default_host()
+    };
+
+    println!("Usando host de audio: {}", host.id().name());
+
     // Get sample rate before MIDI callback
-    let host = cpal::default_host();
     let device = host.default_output_device().expect("No se encontró dispositivo de audio");
     let config = device.default_output_config().unwrap();
     let sample_rate = config.sample_rate().0 as f32;
@@ -178,7 +197,6 @@ fn main() {
     println!("Configuración por defecto: {:?}", config);
     
     // Crear una configuración personalizada con buffer más pequeño
-    let config_type = config.sample_format();
     let config = cpal::StreamConfig {
         channels: config.channels(),
         sample_rate: config.sample_rate(),
@@ -187,7 +205,6 @@ fn main() {
     
     println!("Configuración optimizada: {:?}", config);
     
-    let mut sample_clock = 0f32;
     
     let stream = device.build_output_stream(
         &config,
