@@ -1,93 +1,18 @@
+mod audio;
+mod midi;
+mod structs;
+
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use midir::MidiInput;
 use std::sync::Arc;
 use std::time::Duration;
-use std::collections::{HashMap};
+use std::collections::HashMap;
 use std::sync::{Mutex, Condvar};
 
-struct Envelope {
-    attack: f32,
-    decay: f32,
-    sustain: f32,
-    release: f32,
-    current_amplitude: f32,
-    state: EnvelopeState,
-    sample_rate: f32,
-}
-
-#[derive(PartialEq)]
-enum EnvelopeState {
-    Attack,
-    Decay,
-    Sustain,
-    Release,
-    Off,
-}
-
-impl Envelope {
-    fn new(sample_rate: f32) -> Self {
-        Envelope {
-            attack: 0.005,
-            decay: 0.05,
-            sustain: 0.7,
-            release: 0.05,
-            current_amplitude: 0.0,
-            state: EnvelopeState::Off,
-            sample_rate,
-        }
-    }
-
-    fn next_sample(&mut self) -> f32 {
-        let attack_samples = self.attack * self.sample_rate;
-        let decay_samples = self.decay * self.sample_rate;
-        let release_samples = self.release * self.sample_rate;
-
-        match self.state {
-            EnvelopeState::Attack => {
-                self.current_amplitude += 1.0 / attack_samples;
-                if self.current_amplitude >= 1.0 {
-                    self.current_amplitude = 1.0;
-                    self.state = EnvelopeState::Decay;
-                }
-            }
-            EnvelopeState::Decay => {
-                self.current_amplitude -= (1.0 - self.sustain) / decay_samples;
-                if self.current_amplitude <= self.sustain {
-                    self.current_amplitude = self.sustain;
-                    self.state = EnvelopeState::Sustain;
-                }
-            }
-            EnvelopeState::Sustain => {
-                // Mantener el nivel de sustain
-            }
-            EnvelopeState::Release => {
-                self.current_amplitude -= self.sustain / release_samples;
-                if self.current_amplitude <= 0.0 {
-                    self.current_amplitude = 0.0;
-                    self.state = EnvelopeState::Off;
-                }
-            }
-            EnvelopeState::Off => {
-                self.current_amplitude = 0.0;
-            }
-        }
-        self.current_amplitude
-    }
-
-    fn note_on(&mut self) {
-        self.state = EnvelopeState::Attack;
-    }
-
-    fn note_off(&mut self) {
-        self.state = EnvelopeState::Release;
-    }
-}
-
-struct Note {
-    frequency: f32,
-    envelope: Envelope,
-    phase: f32,  // Añadir tracking de fase
-}
+use crate::audio::soft_clip;
+use crate::midi::midi_note_to_freq;
+use crate::structs::envelope::Envelope;
+use crate::structs::note::Note;
 
 fn main() {
     // Reemplazar el HashSet por un HashMap
@@ -229,8 +154,8 @@ fn main() {
                 *sample = soft_clip(*sample);
             }
             
-            // Clean up finished notes after processing
-            notes.retain(|_, note| note.envelope.state != EnvelopeState::Off);
+            // Clean up finished notes after processing using the public method
+            notes.retain(|_, note| !note.envelope.is_finished());
         },
         |err| eprintln!("Error en el stream: {}", err),
         Some(Duration::from_millis(100))
@@ -253,19 +178,5 @@ fn main() {
     let mut running = lock.lock().unwrap();
     while *running {
         running = cvar.wait(running).unwrap();
-    }
-}
-
-fn midi_note_to_freq(note: u8) -> f32 {
-    440.0 * 2.0_f32.powf((note as f32 - 69.0) / 12.0)
-}
-
-fn soft_clip(x: f32) -> f32 {
-    if x > 1.0 {
-        1.0 - (-1.0 * (x - 1.0)).exp()
-    } else if x < -1.0 {
-        -1.0 + (-1.0 * (-x - 1.0)).exp()
-    } else {
-        x
     }
 }
