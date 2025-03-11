@@ -1,4 +1,5 @@
 use eframe::egui;
+use egui_extras::RetainedImage;
 use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
 use cpal::Device;
@@ -590,13 +591,56 @@ impl eframe::App for SynthApp {
                     drop(config);
                     *self.sample_rate.lock().unwrap() = new_rate as f32;
                 }
+            });
+            
+            ui.add_space(10.0);
+            
+            // Control de volumen en su propia sección
+            ui.group(|ui| {
+                ui.heading("Control de Volumen");
+                ui.add_space(5.0);
                 
-                // Control de volumen
-                let current_volume = *volume.lock().unwrap();
-                let mut new_volume = current_volume;
-                if ui.add(egui::Slider::new(&mut new_volume, 0.0..=1.0).text("Volumen")).changed() {
-                    *volume.lock().unwrap() = new_volume;
-                }
+                let volume_lock = self.config.lock().unwrap().volume.clone();
+                let current_volume = *volume_lock.lock().unwrap();
+                
+                ui.vertical_centered(|ui| {
+                    let desired_size = egui::vec2(100.0, 100.0);
+                    let response = ui.allocate_response(desired_size, egui::Sense::drag());
+                    let painter = ui.painter_at(response.rect);
+                    
+                    if response.dragged() {
+                        let delta = response.drag_delta();
+                        let mut new_volume = current_volume - delta.y * 0.01;
+                        new_volume = new_volume.clamp(0.0, 1.0);
+                        *volume_lock.lock().unwrap() = new_volume;
+                    }
+                    
+                    // Dibujar el knob
+                    let center = response.rect.center();
+                    let radius = (response.rect.width() / 2.0).min(response.rect.height() / 2.0) - 4.0;
+                    
+                    // Dibujar el círculo base
+                    painter.circle_filled(
+                        center,
+                        radius,
+                        egui::Color32::from_gray(32),
+                    );
+                    
+                    // Dibujar el indicador
+                    let angle = std::f32::consts::PI * (0.75 + current_volume * 1.5);
+                    let indicator_pos = egui::pos2(
+                        center.x + radius * angle.cos(),
+                        center.y + radius * angle.sin(),
+                    );
+                    
+                    painter.line_segment(
+                        [center, indicator_pos],
+                        egui::Stroke::new(2.0, egui::Color32::WHITE),
+                    );
+                    
+                    ui.add_space(5.0);
+                    ui.label(format!("{}%", (current_volume * 100.0) as i32));
+                });
             });
             
             ui.add_space(10.0);
