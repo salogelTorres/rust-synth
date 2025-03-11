@@ -4,8 +4,21 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-ctrlc = "3.4"
-midir = "0.9"
-cpal = { version = "0.15", features = ["asio"] }
-fundsp = "0.13"
-asio-sys = "0.2"
+ctrlc = "3.4.1"
+midir = "0.9.1"
+cpal = { version = "0.15.2", features = ["asio"] }
+fundsp = "0.13.0"
+asio-sys = "0.2.2"
+eframe = { version = "0.24.0", features = ["persistence"] }
+egui = "0.24.0"
+egui_extras = "0.24.0"
+rfd = "0.12.0"
+
+[dependencies.winapi]
+version = "0.3.9"
+features = ["winuser", "windef"]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

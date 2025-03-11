@@ -1,5 +1,4 @@
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use std::time::Duration;
+use cpal::traits::DeviceTrait;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
@@ -215,17 +214,8 @@ impl LowPassFilter {
 
 #[inline]
 pub fn soft_clip(x: f32) -> f32 {
-    // Aplicar un factor de escala para reducir la probabilidad de clipeo
-    let scaled = x * 0.7;
-    
-    // Usar una función de saturación más suave para reducir armónicos
-    if scaled > 0.8 {
-        0.8 + (1.0 - 0.8) * ((scaled - 0.8) / (1.0 - 0.8)).tanh()
-    } else if scaled < -0.8 {
-        -0.8 + (1.0 - 0.8) * ((scaled + 0.8) / (1.0 - 0.8)).tanh()
-    } else {
-        scaled
-    }
+    // Función de soft clipping para evitar distorsión
+    x.tanh()
 }
 
 pub fn list_audio_hosts() -> Vec<cpal::HostId> {

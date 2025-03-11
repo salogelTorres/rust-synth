@@ -1,6 +1,7 @@
 mod audio;
 mod midi;
 mod structs;
+mod gui;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use midir::MidiInput;
@@ -8,13 +9,56 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::collections::HashMap;
 use std::sync::{Mutex, Condvar};
+use std::env;
+use egui::ViewportBuilder;
 
 use crate::audio::soft_clip;
 use crate::midi::midi_note_to_freq;
 use crate::structs::envelope::Envelope;
 use crate::structs::note::Note;
+use crate::gui::{SynthApp, SynthConfig};
 
 fn main() {
+    // Verificar si se debe usar la interfaz gráfica
+    let args: Vec<String> = env::args().collect();
+    let use_gui = args.len() > 1 && args[1] == "--gui";
+    
+    if use_gui {
+        // Inicializar la configuración compartida
+        let config = Arc::new(Mutex::new(SynthConfig::default()));
+        
+        // Inicializar las notas activas compartidas
+        let active_notes = Arc::new(Mutex::new(HashMap::new()));
+        
+        // Inicializar la frecuencia de muestreo compartida
+        let sample_rate_shared = Arc::new(Mutex::new(44100.0f32));
+        
+        // Crear la aplicación
+        let app = SynthApp::new(
+            config,
+            active_notes,
+            sample_rate_shared,
+        );
+        
+        // Ejecutar la aplicación
+        let native_options = eframe::NativeOptions {
+            viewport: ViewportBuilder::default()
+                .with_inner_size([800.0, 600.0]),
+            ..Default::default()
+        };
+        
+        eframe::run_native(
+            "Rust Synth",
+            native_options,
+            Box::new(|_cc| Box::new(app)),
+        ).unwrap();
+    } else {
+        // Versión de consola original
+        run_console_version();
+    }
+}
+
+fn run_console_version() {
     // Reemplazar el HashSet por un HashMap
     let active_notes = Arc::new(Mutex::new(HashMap::new()));
     
@@ -322,11 +366,14 @@ fn main() {
         let mut running = lock.lock().unwrap();
         *running = false;
         cvar.notify_one();
-    }).expect("Error setting Ctrl-C handler");
+    }).expect("Error al configurar el manejador de Ctrl+C");
 
+    // Esperar a que el usuario presione Ctrl+C
     let (lock, cvar) = &*running;
     let mut running = lock.lock().unwrap();
     while *running {
         running = cvar.wait(running).unwrap();
     }
+    
+    println!("Saliendo...");
 }
