@@ -18,6 +18,9 @@ fn main() {
     // Reemplazar el HashSet por un HashMap
     let active_notes = Arc::new(Mutex::new(HashMap::new()));
     
+    // Usar un Arc<Mutex<f32>> para la frecuencia de muestreo
+    let sample_rate_shared = Arc::new(Mutex::new(44100.0f32));
+    
     // Configurar entrada MIDI
     let midi_in = MidiInput::new("rust-synth").unwrap();
     let ports = midi_in.ports();
@@ -28,6 +31,7 @@ fn main() {
     }
 
     let notes_for_audio = active_notes.clone();
+    let sample_rate_for_midi = sample_rate_shared.clone();
 
     // Listar hosts de audio disponibles
     println!("\nHosts de audio disponibles:");
@@ -59,26 +63,24 @@ fn main() {
 
     // Get sample rate before MIDI callback
     let device = host.default_output_device().expect("No se encontró dispositivo de audio");
-    let config = device.default_output_config().unwrap();
-    let sample_rate = config.sample_rate().0 as f32;
+    let default_config = device.default_output_config().unwrap();
+    *sample_rate_shared.lock().unwrap() = default_config.sample_rate().0 as f32;
     
     // Callback para mensajes MIDI
     let _midi_connection = midi_in.connect(&ports[0], "midi-read", move |_timestamp, message, _| {
         if message.len() == 3 {
             let mut notes = active_notes.lock().unwrap();
+            let current_sample_rate = *sample_rate_for_midi.lock().unwrap();
+            
             match message[0] {
                 0x90 => { // Note On
                     let note = message[1];
                     let velocity = message[2];
                     if velocity > 0 {
                         let freq = midi_note_to_freq(note);
-                        let mut envelope = Envelope::new(sample_rate);
+                        let mut envelope = Envelope::new(current_sample_rate);
                         envelope.note_on();
-                        notes.insert(note, Note {
-                            frequency: freq,
-                            envelope,
-                            phase: 0.0,  // Inicializar fase
-                        });
+                        notes.insert(note, Note::new(freq, envelope, current_sample_rate));
                     } else {
                         if let Some(note_data) = notes.get_mut(&note) {
                             note_data.envelope.note_off();
@@ -144,14 +146,40 @@ fn main() {
                 config.max_sample_rate());
         }
 
-        // Encontrar una configuración compatible
+        // Encontrar una configuración compatible con al menos 44100 Hz
         let supported_config = configs.iter()
-            .find(|config| config.channels() == 2)
+            .find(|config| config.channels() == 2 && config.min_sample_rate().0 >= 44100)
+            .or_else(|| configs.iter().find(|config| config.channels() == 2 && config.max_sample_rate().0 >= 44100))
             .expect("No se encontró una configuración compatible con ASIO");
+
+        // Usar directamente la frecuencia de muestreo de la configuración seleccionada
+        // o forzar a 44100 Hz si es menor
+        let asio_sample_rate = if supported_config.min_sample_rate().0 >= 44100 {
+            supported_config.min_sample_rate()
+        } else {
+            // Forzar a 44100 Hz como mínimo
+            cpal::SampleRate(44100)
+        };
+        
+        println!("Configuración ASIO seleccionada: Canales: {}, Formato: {:?}, Sample Rate: {:?}", 
+            supported_config.channels(), 
+            supported_config.sample_format(),
+            asio_sample_rate);
+        
+        // Actualizar la variable sample_rate para que coincida con la configuración de ASIO
+        *sample_rate_shared.lock().unwrap() = asio_sample_rate.0 as f32;
+        let current_sample_rate = *sample_rate_shared.lock().unwrap();
+        
+        println!("Usando frecuencia de muestreo para ASIO: {} Hz", current_sample_rate);
+        println!("Nota A4 (MIDI 69) = {} Hz", midi_note_to_freq(69));
+        println!("Nota C4 (MIDI 60) = {} Hz", midi_note_to_freq(60));
+        println!("Nota C7 (MIDI 96) = {} Hz", midi_note_to_freq(96));
+        println!("Frecuencia de Nyquist: {} Hz", current_sample_rate / 2.0);
+        println!("Límite seguro para evitar aliasing: {} Hz", current_sample_rate / 4.0);
 
         cpal::StreamConfig {
             channels: 2,
-            sample_rate: supported_config.min_sample_rate(),
+            sample_rate: asio_sample_rate,
             buffer_size: cpal::BufferSize::Default,
         }
     } else {
@@ -169,36 +197,61 @@ fn main() {
 
     println!("Configuración optimizada: {:?}", config);
     
+    let sample_rate_for_audio = sample_rate_shared.clone();
+    
+    // Tamaño del buffer de audio para reducir las operaciones de bloqueo
+    const BUFFER_SIZE: usize = 64;
+    
     let stream = match sample_format {
         cpal::SampleFormat::I32 => device.build_output_stream(
             &config,
             move |data: &mut [i32], _: &cpal::OutputCallbackInfo| {
-                let mut notes = notes_for_audio.lock().unwrap();
+                // Adquirir el bloqueo una vez por buffer en lugar de por muestra
+                let mut notes_guard = notes_for_audio.lock().unwrap();
+                let current_sample_rate = *sample_rate_for_audio.lock().unwrap();
                 
-                let channels = config.channels as usize;
-                for frame in data.chunks_mut(channels) {
-                    let sample = {
-                        let mut mix = 0.0;
-                        
-                        for note in notes.values_mut() {
-                            let envelope_amp = note.envelope.next_sample();
-                            note.phase += 2.0 * std::f32::consts::PI * note.frequency / sample_rate;
-                            while note.phase >= 2.0 * std::f32::consts::PI {
-                                note.phase -= 2.0 * std::f32::consts::PI;
-                            }
-                            mix += note.phase.sin() * envelope_amp * 0.15;
-                        }
-                        
-                        // Convertir de f32 a i32
-                        (soft_clip(mix) * i32::MAX as f32) as i32
-                    };
-
-                    for channel in frame.iter_mut() {
-                        *channel = sample;
+                // Actualizar las frecuencias de muestreo si es necesario
+                for note in notes_guard.values_mut() {
+                    if note.sample_rate != current_sample_rate {
+                        note.sample_rate = current_sample_rate;
+                        note.oscillator.set_frequency(note.frequency, current_sample_rate);
                     }
                 }
                 
-                notes.retain(|_, note| !note.envelope.is_finished());
+                let channels = config.channels as usize;
+                
+                // Procesar el audio en bloques para mejorar la eficiencia
+                for chunk in data.chunks_mut(channels * BUFFER_SIZE).filter(|c| !c.is_empty()) {
+                    // Generar un buffer temporal de muestras
+                    let mut temp_buffer = [0.0f32; BUFFER_SIZE];
+                    
+                    // Generar todas las muestras para este bloque
+                    for (i, frame) in chunk.chunks_mut(channels).enumerate() {
+                        if i < BUFFER_SIZE {
+                            let sample = {
+                                let mut mix = 0.0;
+                                
+                                for note in notes_guard.values_mut() {
+                                    let envelope_amp = note.envelope.next_sample();
+                                    let sine_value = note.get_sample();
+                                    mix += sine_value * envelope_amp * 0.15;
+                                }
+                                
+                                // Aplicar soft clip y convertir a i32
+                                temp_buffer[i] = soft_clip(mix);
+                                (temp_buffer[i] * i32::MAX as f32) as i32
+                            };
+                            
+                            // Copiar la muestra a todos los canales
+                            for channel in frame.iter_mut() {
+                                *channel = sample;
+                            }
+                        }
+                    }
+                }
+                
+                // Eliminar las notas terminadas
+                notes_guard.retain(|_, note| !note.envelope.is_finished());
             },
             |err| eprintln!("Error en el stream: {}", err),
             Some(Duration::from_millis(100))
@@ -206,35 +259,52 @@ fn main() {
         _ => device.build_output_stream(
             &config,
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                let mut notes = notes_for_audio.lock().unwrap();
+                // Adquirir el bloqueo una vez por buffer en lugar de por muestra
+                let mut notes_guard = notes_for_audio.lock().unwrap();
+                let current_sample_rate = *sample_rate_for_audio.lock().unwrap();
                 
-                // Procesar el audio en grupos de channels
-                let channels = config.channels as usize;
-                for frame in data.chunks_mut(channels) {
-                    let sample = {
-                        let mut mix = 0.0;
-                        
-                        for note in notes.values_mut() {
-                            let envelope_amp = note.envelope.next_sample();
-                            
-                            note.phase += 2.0 * std::f32::consts::PI * note.frequency / sample_rate;
-                            while note.phase >= 2.0 * std::f32::consts::PI {
-                                note.phase -= 2.0 * std::f32::consts::PI;
-                            }
-                            
-                            mix += note.phase.sin() * envelope_amp * 0.15;
-                        }
-                        
-                        soft_clip(mix)
-                    };
-
-                    // Copiar el mismo valor a todos los canales
-                    for channel in frame.iter_mut() {
-                        *channel = sample;
+                // Actualizar las frecuencias de muestreo si es necesario
+                for note in notes_guard.values_mut() {
+                    if note.sample_rate != current_sample_rate {
+                        note.sample_rate = current_sample_rate;
+                        note.oscillator.set_frequency(note.frequency, current_sample_rate);
                     }
                 }
                 
-                notes.retain(|_, note| !note.envelope.is_finished());
+                let channels = config.channels as usize;
+                
+                // Procesar el audio en bloques para mejorar la eficiencia
+                for chunk in data.chunks_mut(channels * BUFFER_SIZE).filter(|c| !c.is_empty()) {
+                    // Generar un buffer temporal de muestras
+                    let mut temp_buffer = [0.0f32; BUFFER_SIZE];
+                    
+                    // Generar todas las muestras para este bloque
+                    for (i, frame) in chunk.chunks_mut(channels).enumerate() {
+                        if i < BUFFER_SIZE {
+                            let sample = {
+                                let mut mix = 0.0;
+                                
+                                for note in notes_guard.values_mut() {
+                                    let envelope_amp = note.envelope.next_sample();
+                                    let sine_value = note.get_sample();
+                                    mix += sine_value * envelope_amp * 0.15;
+                                }
+                                
+                                // Aplicar soft clip
+                                temp_buffer[i] = soft_clip(mix);
+                                temp_buffer[i]
+                            };
+                            
+                            // Copiar la muestra a todos los canales
+                            for channel in frame.iter_mut() {
+                                *channel = sample;
+                            }
+                        }
+                    }
+                }
+                
+                // Eliminar las notas terminadas
+                notes_guard.retain(|_, note| !note.envelope.is_finished());
             },
             |err| eprintln!("Error en el stream: {}", err),
             Some(Duration::from_millis(100))
