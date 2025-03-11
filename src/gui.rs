@@ -18,7 +18,7 @@ pub struct SynthConfig {
     pub available_sample_rates: Vec<u32>,
     pub selected_config: Option<cpal::SupportedStreamConfig>,
     pub running: bool,
-    pub volume: f32,
+    pub volume: Arc<Mutex<f32>>,
 }
 
 impl Default for SynthConfig {
@@ -32,7 +32,7 @@ impl Default for SynthConfig {
             available_sample_rates: Vec::new(),
             selected_config: None,
             running: false,
-            volume: 0.15,
+            volume: Arc::new(Mutex::new(0.15)),
         }
     }
 }
@@ -238,7 +238,7 @@ impl SynthApp {
             config_clone = config.selected_config.clone();
             host_index = config.host_index;
             device_index = config.device_index;
-            volume = config.volume;
+            volume = config.volume.clone();
         }
         
         // Obtener el host seleccionado
@@ -291,6 +291,7 @@ impl SynthApp {
                     // Adquirir el bloqueo una vez por buffer en lugar de por muestra
                     let mut notes_guard = active_notes.lock().unwrap();
                     let current_sample_rate = *sample_rate_shared.lock().unwrap();
+                    let current_volume = *volume.lock().unwrap();
                     
                     // Actualizar las frecuencias de muestreo si es necesario
                     for note in notes_guard.values_mut() {
@@ -316,7 +317,7 @@ impl SynthApp {
                                     for note in notes_guard.values_mut() {
                                         let envelope_amp = note.envelope.next_sample();
                                         let sine_value = note.get_sample();
-                                        mix += sine_value * envelope_amp * volume;
+                                        mix += sine_value * envelope_amp * current_volume;
                                     }
                                     
                                     // Aplicar soft clip y convertir a i32
@@ -344,6 +345,7 @@ impl SynthApp {
                     // Adquirir el bloqueo una vez por buffer en lugar de por muestra
                     let mut notes_guard = active_notes.lock().unwrap();
                     let current_sample_rate = *sample_rate_shared.lock().unwrap();
+                    let current_volume = *volume.lock().unwrap();
                     
                     // Actualizar las frecuencias de muestreo si es necesario
                     for note in notes_guard.values_mut() {
@@ -369,7 +371,7 @@ impl SynthApp {
                                     for note in notes_guard.values_mut() {
                                         let envelope_amp = note.envelope.next_sample();
                                         let sine_value = note.get_sample();
-                                        mix += sine_value * envelope_amp * volume;
+                                        mix += sine_value * envelope_amp * current_volume;
                                     }
                                     
                                     // Aplicar soft clip
@@ -507,7 +509,7 @@ impl eframe::App for SynthApp {
                     rate_text = config.available_sample_rates.get(config.sample_rate_index)
                         .map(|rate| format!("{} Hz", rate))
                         .unwrap_or_else(|| "Ninguna".to_string());
-                    volume = config.volume;
+                    volume = config.volume.clone();
                     
                     // Clonar las colecciones para evitar problemas de préstamo
                     available_hosts = config.available_hosts.clone();
@@ -590,10 +592,10 @@ impl eframe::App for SynthApp {
                 }
                 
                 // Control de volumen
-                let mut new_volume = volume;
+                let current_volume = *volume.lock().unwrap();
+                let mut new_volume = current_volume;
                 if ui.add(egui::Slider::new(&mut new_volume, 0.0..=1.0).text("Volumen")).changed() {
-                    let mut config = self.config.lock().unwrap();
-                    config.volume = new_volume;
+                    *volume.lock().unwrap() = new_volume;
                 }
             });
             
