@@ -2,7 +2,7 @@ use std::f32::consts::PI;
 use crate::structs::envelope::Envelope;
 use crate::gui::WaveType;
 
-const OVERSAMPLING: usize = 4; // Factor de sobremuestreo
+const OVERSAMPLING: usize = 4; // Reducido ya que usaremos PolyBLEP
 
 pub struct LowPassFilter {
     prev_sample: f32,
@@ -10,6 +10,7 @@ pub struct LowPassFilter {
 }
 
 impl LowPassFilter {
+    #[inline(always)]
     pub fn new(cutoff_freq: f32, sample_rate: f32) -> Self {
         let rc = 1.0 / (2.0 * PI * cutoff_freq);
         let dt = 1.0 / sample_rate;
@@ -20,9 +21,17 @@ impl LowPassFilter {
         }
     }
 
+    #[inline(always)]
     pub fn process(&mut self, input: f32) -> f32 {
-        self.prev_sample = self.prev_sample + self.alpha * (input - self.prev_sample);
+        self.prev_sample += self.alpha * (input - self.prev_sample);
         self.prev_sample
+    }
+
+    #[inline(always)]
+    pub fn set_cutoff(&mut self, cutoff_freq: f32, sample_rate: f32) {
+        let rc = 1.0 / (2.0 * PI * cutoff_freq);
+        let dt = 1.0 / sample_rate;
+        self.alpha = dt / (rc + dt);
     }
 }
 
@@ -33,6 +42,8 @@ pub struct Oscillator {
     pub volume: f32,
     filter: LowPassFilter,
     oversample_buffer: [f32; OVERSAMPLING],
+    prev_frequency: f32,
+    prev_cutoff: f32,
 }
 
 impl Oscillator {
@@ -44,48 +55,83 @@ impl Oscillator {
             volume: 1.0,
             filter: LowPassFilter::new(20000.0, sample_rate * OVERSAMPLING as f32),
             oversample_buffer: [0.0; OVERSAMPLING],
+            prev_frequency: 0.0,
+            prev_cutoff: 20000.0,
         }
     }
 
+    #[inline(always)]
+    fn poly_blep(&self, t: f32, dt: f32) -> f32 {
+        if t < dt {
+            let t = t / dt;
+            return 2.0 * t - t * t - 1.0;
+        } else if t > 1.0 - dt {
+            let t = (t - 1.0) / dt;
+            return t * t + 2.0 * t + 1.0;
+        }
+        0.0
+    }
+
+    #[inline(always)]
+    fn get_bandlimited_square(&mut self, phase_norm: f32, phase_inc: f32) -> f32 {
+        let mut square = if phase_norm < 0.5 { 1.0 } else { -1.0 };
+        square += self.poly_blep(phase_norm, phase_inc);
+        square -= self.poly_blep((phase_norm + 0.5) % 1.0, phase_inc);
+        square
+    }
+
+    #[inline(always)]
+    fn get_bandlimited_saw(&mut self, phase_norm: f32, phase_inc: f32) -> f32 {
+        let mut saw = 2.0 * phase_norm - 1.0;
+        saw -= self.poly_blep(phase_norm, phase_inc);
+        saw
+    }
+
+    #[inline(always)]
+    fn get_bandlimited_triangle(&mut self, phase_norm: f32) -> f32 {
+        // El triángulo tiene menos aliasing por naturaleza, usamos integración
+        let phase_quad = phase_norm * 4.0;
+        if phase_quad < 1.0 {
+            phase_quad
+        } else if phase_quad < 2.0 {
+            2.0 - phase_quad
+        } else if phase_quad < 3.0 {
+            phase_quad - 4.0
+        } else {
+            -4.0 + phase_quad
+        }
+    }
+
+    #[inline(always)]
     pub fn get_sample(&mut self, base_frequency: f32, sample_rate: f32) -> f32 {
         // Calcular la frecuencia con detune
         let frequency = base_frequency * (2.0f32.powf(self.detune / 12.0));
-        let oversample_rate = sample_rate * OVERSAMPLING as f32;
+        let phase_inc = frequency / sample_rate;
         
-        // Generar muestras sobremuestreadas
-        for i in 0..OVERSAMPLING {
-            let sample = match self.wave_type {
-                WaveType::Sine => self.phase.sin(),
-                WaveType::Square => if self.phase.sin() >= 0.0 { 1.0 } else { -1.0 },
-                WaveType::Triangle => {
-                    let phase_norm = (self.phase / PI) % 2.0;
-                    if phase_norm < 0.5 {
-                        phase_norm * 4.0 - 1.0
-                    } else if phase_norm < 1.5 {
-                        1.0 - (phase_norm - 0.5) * 4.0
-                    } else {
-                        (phase_norm - 2.0) * 4.0 + 1.0
-                    }
-                },
-                WaveType::Sawtooth => {
-                    let phase_norm = (self.phase / PI) % 2.0;
-                    2.0 * (phase_norm - 1.0)
-                },
-            };
+        // Normalizar fase entre 0 y 1
+        let phase_norm = self.phase / (2.0 * PI);
+        
+        // Generar forma de onda con antialiasing
+        let sample = match self.wave_type {
+            WaveType::Sine => (self.phase).sin(),
+            WaveType::Square => self.get_bandlimited_square(phase_norm, phase_inc),
+            WaveType::Triangle => self.get_bandlimited_triangle(phase_norm),
+            WaveType::Sawtooth => self.get_bandlimited_saw(phase_norm, phase_inc),
+        };
 
-            // Actualizar fase para cada muestra sobremuestreada
-            self.phase += 2.0 * PI * frequency / oversample_rate;
-            if self.phase >= 2.0 * PI {
-                self.phase -= 2.0 * PI;
-            }
-
-            // Aplicar filtro antialiasing
-            self.oversample_buffer[i] = self.filter.process(sample);
+        // Actualizar fase
+        self.phase += 2.0 * PI * phase_inc;
+        if self.phase >= 2.0 * PI {
+            self.phase -= 2.0 * PI;
         }
 
-        // Promediar las muestras sobremuestreadas
-        let final_sample = self.oversample_buffer.iter().sum::<f32>() / OVERSAMPLING as f32;
-        final_sample * self.volume
+        // Aplicar suavizado adicional para frecuencias muy altas
+        if frequency > sample_rate * 0.25 {
+            let smoothing = 1.0 - ((frequency - sample_rate * 0.25) / (sample_rate * 0.25)).min(1.0);
+            sample * smoothing * self.volume
+        } else {
+            sample * self.volume
+        }
     }
 }
 
