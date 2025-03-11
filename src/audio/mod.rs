@@ -212,9 +212,20 @@ impl LowPassFilter {
     }
 }
 
+pub mod filters;
+pub mod oscillator;
+pub mod note;
+pub mod wavetable;
+
+// Re-export principales componentes
+pub use filters::LowPassFilter;
+pub use oscillator::Oscillator;
+pub use note::Note;
+pub use wavetable::WavetableOscillator;
+
+// Funciones de utilidad para el sistema de audio
 #[inline]
 pub fn soft_clip(x: f32) -> f32 {
-    // Función de soft clipping para evitar distorsión
     x.tanh()
 }
 

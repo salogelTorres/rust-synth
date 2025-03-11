@@ -4,7 +4,6 @@ mod structs;
 mod gui;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use midir::{MidiInput, MidiInputConnection};
 use std::sync::Arc;
 use std::time::Duration;
 use std::collections::HashMap;
@@ -12,10 +11,18 @@ use std::sync::{Mutex, Condvar};
 use std::env;
 use egui::ViewportBuilder;
 
-use crate::audio::soft_clip;
-use crate::midi::midi_note_to_freq;
-use crate::structs::envelope::Envelope;
-use crate::structs::note::Note;
+// Importaciones del módulo de audio
+use crate::audio::{
+    soft_clip,
+    Note,
+    create_audio_config,
+    list_audio_hosts,
+};
+
+// Importaciones del módulo MIDI
+use crate::midi::{midi_note_to_freq, connect_midi};
+
+// Importaciones de GUI y estructuras
 use crate::gui::{SynthApp, SynthConfig, WaveType};
 
 fn main() {
@@ -69,25 +76,15 @@ fn run_console_version() {
     let wave_type_shared = Arc::new(Mutex::new(WaveType::Sine));
     
     // Configurar entrada MIDI
-    let midi_in = MidiInput::new("rust-synth").unwrap();
-    let ports = midi_in.ports();
-    
-    if ports.is_empty() {
-        println!("No hay dispositivos MIDI disponibles");
-        return;
-    }
-
-    let notes_for_audio = active_notes.clone();
-    let sample_rate_for_midi = sample_rate_shared.clone();
-    let wave_type_for_midi = wave_type_shared.clone();
+    let midi_in = connect_midi(
+        active_notes.clone(),
+        sample_rate_shared.clone(),
+        wave_type_shared.clone(),
+    ).expect("No se pudo conectar al dispositivo MIDI");
 
     // Listar hosts de audio disponibles
     println!("\nHosts de audio disponibles:");
-    let available_hosts = cpal::available_hosts();
-    for (idx, host_id) in available_hosts.iter().enumerate() {
-        println!("{}. {} {}", idx, host_id.name(), 
-            if host_id.name() == "ASIO" { "(Recomendado para menor latencia)" } else { "" });
-    }
+    let available_hosts = list_audio_hosts();
 
     println!("\nSelecciona un host (0-{}): ", available_hosts.len() - 1);
     let mut input = String::new();
@@ -113,45 +110,6 @@ fn run_console_version() {
     let device = host.default_output_device().expect("No se encontró dispositivo de audio");
     let default_config = device.default_output_config().unwrap();
     *sample_rate_shared.lock().unwrap() = default_config.sample_rate().0 as f32;
-    
-    // Callback para mensajes MIDI
-    let _midi_connection = midi_in.connect(&ports[0], "midi-read", move |_timestamp, message, _| {
-        if message.len() == 3 {
-            let mut notes = active_notes.lock().unwrap();
-            let current_sample_rate = *sample_rate_for_midi.lock().unwrap();
-            let current_wave_type = *wave_type_for_midi.lock().unwrap();
-            
-            match message[0] {
-                0x90 => { // Note On
-                    let note = message[1];
-                    let velocity = message[2] as f32 / 127.0;
-                    if velocity > 0.0 {
-                        let freq = midi_note_to_freq(note);
-                        println!("Nota MIDI {} -> Frecuencia {} Hz", note, freq);
-                        let mut envelope = Envelope::new(current_sample_rate);
-                        envelope.set_adsr(0.01, 0.1, 0.7, 0.3);
-                        envelope.set_velocity(velocity);
-                        envelope.note_on();
-                        notes.insert(note, Note::new(freq, envelope, current_sample_rate, current_wave_type, current_wave_type));
-                    } else {
-                        if let Some(note_data) = notes.get_mut(&note) {
-                            note_data.envelope.note_off();
-                        }
-                    }
-                },
-                0x80 => { // Note Off
-                    let note = message[1];
-                    if let Some(note_data) = notes.get_mut(&note) {
-                        note_data.envelope.note_off();
-                    }
-                },
-                _ => (),
-            }
-        }
-    }, ()).unwrap();
-
-    // Configurar salida de audio
-    println!("Usando host de audio: {}", host.id().name());
     
     // Listar dispositivos de salida disponibles
     println!("\nDispositivos de salida disponibles:");
@@ -235,11 +193,7 @@ fn run_console_version() {
             buffer_size: cpal::BufferSize::Default,
         }
     } else {
-        cpal::StreamConfig {
-            channels: config.channels(),
-            sample_rate: config.sample_rate(),
-            buffer_size: cpal::BufferSize::Fixed(512),
-        }
+        create_audio_config(&device)
     };
     
     // Get the sample format before creating the stream
@@ -250,6 +204,7 @@ fn run_console_version() {
     println!("Configuración optimizada: {:?}", config);
     
     let sample_rate_for_audio = sample_rate_shared.clone();
+    let notes_for_audio = active_notes.clone();
     
     // Tamaño del buffer de audio para reducir las operaciones de bloqueo
     const BUFFER_SIZE: usize = 64;
@@ -384,52 +339,4 @@ fn run_console_version() {
     }
     
     println!("Saliendo...");
-}
-
-fn handle_midi_message(msg: &[u8], active_notes: Arc<Mutex<HashMap<u8, Note>>>, sample_rate: Arc<Mutex<f32>>, wave_type: Arc<Mutex<WaveType>>) {
-    match msg[0] & 0xF0 {
-        0x90 => { // Note On
-            let note = msg[1];
-            let velocity = msg[2] as f32 / 127.0;
-            if velocity > 0.0 {
-                let freq = midi_note_to_freq(note);
-                let mut envelope = Envelope::new(*sample_rate.lock().unwrap());
-                envelope.set_adsr(0.01, 0.1, 0.7, 0.3);
-                envelope.set_velocity(velocity);
-                let current_wave_type = *wave_type.lock().unwrap();
-                let new_note = Note::new(freq, envelope, *sample_rate.lock().unwrap(), current_wave_type, current_wave_type);
-                active_notes.lock().unwrap().insert(note, new_note);
-            } else {
-                if let Some(note) = active_notes.lock().unwrap().get_mut(&note) {
-                    note.envelope.note_off();
-                }
-            }
-        },
-        0x80 => { // Note Off
-            let note = msg[1];
-            if let Some(note) = active_notes.lock().unwrap().get_mut(&note) {
-                note.envelope.note_off();
-            }
-        },
-        _ => (),
-    }
-}
-
-fn connect_midi(active_notes: Arc<Mutex<HashMap<u8, Note>>>, sample_rate: Arc<Mutex<f32>>, wave_type: Arc<Mutex<WaveType>>) -> Option<MidiInputConnection<()>> {
-    let midi_in = MidiInput::new("rust-synth").ok()?;
-    let ports = midi_in.ports();
-    let port = ports.get(0)?;
-
-    let notes = active_notes.clone();
-    let sr = sample_rate.clone();
-    let wt = wave_type.clone();
-    
-    midi_in.connect(
-        port,
-        "rust-synth",
-        move |_stamp, message, _| {
-            handle_midi_message(message, notes.clone(), sr.clone(), wt.clone());
-        },
-        (),
-    ).ok()
 }
