@@ -6,5 +6,6 @@ edition = "2021"
 [dependencies]
 ctrlc = "3.4"
 midir = "0.9"
-cpal = "0.15"
+cpal = { version = "0.15", features = ["asio"] }
 fundsp = "0.13"
+asio-sys = "0.2"

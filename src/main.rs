@@ -33,7 +33,8 @@ fn main() {
     println!("\nHosts de audio disponibles:");
     let available_hosts = cpal::available_hosts();
     for (idx, host_id) in available_hosts.iter().enumerate() {
-        println!("{}. {}", idx, host_id.name());
+        println!("{}. {} {}", idx, host_id.name(), 
+            if host_id.name() == "ASIO" { "(Recomendado para menor latencia)" } else { "" });
     }
 
     println!("\nSelecciona un host (0-{}): ", available_hosts.len() - 1);
@@ -48,6 +49,11 @@ fn main() {
         println!("Índice inválido, usando host por defecto");
         cpal::default_host()
     };
+
+    if host.id().name() == "ASIO" {
+        println!("Usando ASIO - Asegúrate de tener abierto el panel de control de ASIO4ALL");
+        println!("y haber configurado correctamente tu dispositivo de audio");
+    }
 
     println!("Usando host de audio: {}", host.id().name());
 
@@ -121,45 +127,119 @@ fn main() {
     let config = device.default_output_config().unwrap();
     println!("Configuración por defecto: {:?}", config);
     
-    // Crear una configuración personalizada con buffer más pequeño
-    let config = cpal::StreamConfig {
-        channels: config.channels(),
-        sample_rate: config.sample_rate(),
-        buffer_size: cpal::BufferSize::Fixed(512),  // Volvemos a 512 para estabilidad
+    // Crear una configuración compatible con ASIO
+    let config = if host.id().name() == "ASIO" {
+        // ASIO generalmente requiere configuraciones específicas
+        let supported_configs = device.supported_output_configs()
+            .expect("Error al obtener configuraciones soportadas");
+
+        // Imprimir configuraciones soportadas para debug
+        println!("\nConfiguraciones soportadas por ASIO:");
+        let configs: Vec<_> = supported_configs.collect();
+        for config in &configs {
+            println!("Canales: {}, Formato: {:?}, Sample Rate: {:?}-{:?}", 
+                config.channels(), 
+                config.sample_format(),
+                config.min_sample_rate(),
+                config.max_sample_rate());
+        }
+
+        // Encontrar una configuración compatible
+        let supported_config = configs.iter()
+            .find(|config| config.channels() == 2)
+            .expect("No se encontró una configuración compatible con ASIO");
+
+        cpal::StreamConfig {
+            channels: 2,
+            sample_rate: supported_config.min_sample_rate(),
+            buffer_size: cpal::BufferSize::Default,
+        }
+    } else {
+        cpal::StreamConfig {
+            channels: config.channels(),
+            sample_rate: config.sample_rate(),
+            buffer_size: cpal::BufferSize::Fixed(512),
+        }
     };
     
+    // Get the sample format before creating the stream
+    let sample_format = device.default_output_config()
+        .expect("Failed to get default output config")
+        .sample_format();
+
     println!("Configuración optimizada: {:?}", config);
     
-    
-    let stream = device.build_output_stream(
-        &config,
-        move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-            let mut notes = notes_for_audio.lock().unwrap();
-            
-            for sample in data.iter_mut() {
-                *sample = 0.0;
+    let stream = match sample_format {
+        cpal::SampleFormat::I32 => device.build_output_stream(
+            &config,
+            move |data: &mut [i32], _: &cpal::OutputCallbackInfo| {
+                let mut notes = notes_for_audio.lock().unwrap();
                 
-                // Process each note directly
-                for note in notes.values_mut() {
-                    let envelope_amp = note.envelope.next_sample();
-                    
-                    note.phase += 2.0 * std::f32::consts::PI * note.frequency / sample_rate;
-                    while note.phase >= 2.0 * std::f32::consts::PI {
-                        note.phase -= 2.0 * std::f32::consts::PI;
+                let channels = config.channels as usize;
+                for frame in data.chunks_mut(channels) {
+                    let sample = {
+                        let mut mix = 0.0;
+                        
+                        for note in notes.values_mut() {
+                            let envelope_amp = note.envelope.next_sample();
+                            note.phase += 2.0 * std::f32::consts::PI * note.frequency / sample_rate;
+                            while note.phase >= 2.0 * std::f32::consts::PI {
+                                note.phase -= 2.0 * std::f32::consts::PI;
+                            }
+                            mix += note.phase.sin() * envelope_amp * 0.15;
+                        }
+                        
+                        // Convertir de f32 a i32
+                        (soft_clip(mix) * i32::MAX as f32) as i32
+                    };
+
+                    for channel in frame.iter_mut() {
+                        *channel = sample;
                     }
-                    
-                    *sample += note.phase.sin() * envelope_amp * 0.15;
                 }
                 
-                *sample = soft_clip(*sample);
-            }
-            
-            // Clean up finished notes after processing using the public method
-            notes.retain(|_, note| !note.envelope.is_finished());
-        },
-        |err| eprintln!("Error en el stream: {}", err),
-        Some(Duration::from_millis(100))
-    ).unwrap();
+                notes.retain(|_, note| !note.envelope.is_finished());
+            },
+            |err| eprintln!("Error en el stream: {}", err),
+            Some(Duration::from_millis(100))
+        ),
+        _ => device.build_output_stream(
+            &config,
+            move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                let mut notes = notes_for_audio.lock().unwrap();
+                
+                // Procesar el audio en grupos de channels
+                let channels = config.channels as usize;
+                for frame in data.chunks_mut(channels) {
+                    let sample = {
+                        let mut mix = 0.0;
+                        
+                        for note in notes.values_mut() {
+                            let envelope_amp = note.envelope.next_sample();
+                            
+                            note.phase += 2.0 * std::f32::consts::PI * note.frequency / sample_rate;
+                            while note.phase >= 2.0 * std::f32::consts::PI {
+                                note.phase -= 2.0 * std::f32::consts::PI;
+                            }
+                            
+                            mix += note.phase.sin() * envelope_amp * 0.15;
+                        }
+                        
+                        soft_clip(mix)
+                    };
+
+                    // Copiar el mismo valor a todos los canales
+                    for channel in frame.iter_mut() {
+                        *channel = sample;
+                    }
+                }
+                
+                notes.retain(|_, note| !note.envelope.is_finished());
+            },
+            |err| eprintln!("Error en el stream: {}", err),
+            Some(Duration::from_millis(100))
+        )
+    }.unwrap();
 
     stream.play().unwrap();
 
