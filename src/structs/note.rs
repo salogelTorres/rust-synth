@@ -73,7 +73,7 @@ impl Oscillator {
     }
 
     #[inline(always)]
-    fn get_bandlimited_square(&mut self, phase_norm: f32, phase_inc: f32) -> f32 {
+    fn get_bandlimited_square(&self, phase_norm: f32, phase_inc: f32) -> f32 {
         let mut square = if phase_norm < 0.5 { 1.0 } else { -1.0 };
         square += self.poly_blep(phase_norm, phase_inc);
         square -= self.poly_blep((phase_norm + 0.5) % 1.0, phase_inc);
@@ -81,14 +81,14 @@ impl Oscillator {
     }
 
     #[inline(always)]
-    fn get_bandlimited_saw(&mut self, phase_norm: f32, phase_inc: f32) -> f32 {
+    fn get_bandlimited_saw(&self, phase_norm: f32, phase_inc: f32) -> f32 {
         let mut saw = 2.0 * phase_norm - 1.0;
         saw -= self.poly_blep(phase_norm, phase_inc);
         saw
     }
 
     #[inline(always)]
-    fn get_bandlimited_triangle(&mut self, phase_norm: f32) -> f32 {
+    fn get_bandlimited_triangle(&self, phase_norm: f32) -> f32 {
         // El triángulo tiene menos aliasing por naturaleza, usamos integración
         let phase_quad = phase_norm * 4.0;
         if phase_quad < 1.0 {
@@ -108,11 +108,26 @@ impl Oscillator {
         let frequency = base_frequency * (2.0f32.powf(self.detune / 12.0));
         let phase_inc = frequency / sample_rate;
         
+        // Ajustar el filtro dinámicamente solo si hay un cambio significativo
+        // Usar un filtro más agresivo para frecuencias altas
+        let cutoff = if frequency > sample_rate * 0.125 {
+            // Para frecuencias altas, filtrar más agresivamente
+            frequency * 1.5
+        } else {
+            // Para frecuencias bajas, permitir más armónicos
+            frequency * 2.5
+        };
+
+        if (cutoff - self.prev_cutoff).abs() > 1.0 {
+            self.filter.set_cutoff(cutoff.min(sample_rate * 0.45), sample_rate);
+            self.prev_cutoff = cutoff;
+        }
+        
         // Normalizar fase entre 0 y 1
         let phase_norm = self.phase / (2.0 * PI);
         
         // Generar forma de onda con antialiasing
-        let sample = match self.wave_type {
+        let raw_sample = match self.wave_type {
             WaveType::Sine => (self.phase).sin(),
             WaveType::Square => self.get_bandlimited_square(phase_norm, phase_inc),
             WaveType::Triangle => self.get_bandlimited_triangle(phase_norm),
@@ -125,12 +140,12 @@ impl Oscillator {
             self.phase -= 2.0 * PI;
         }
 
-        // Aplicar suavizado adicional para frecuencias muy altas
+        // Aplicar filtro solo para frecuencias muy altas
         if frequency > sample_rate * 0.25 {
             let smoothing = 1.0 - ((frequency - sample_rate * 0.25) / (sample_rate * 0.25)).min(1.0);
-            sample * smoothing * self.volume
+            self.filter.process(raw_sample) * smoothing * self.volume
         } else {
-            sample * self.volume
+            raw_sample * self.volume
         }
     }
 }
