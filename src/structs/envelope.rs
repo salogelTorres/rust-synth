@@ -1,99 +1,107 @@
-#[derive(PartialEq, Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub enum EnvelopeState {
+    Idle,
     Attack,
     Decay,
     Sustain,
     Release,
-    Off,
 }
 
 pub struct Envelope {
-    attack: f32,
-    decay: f32,
-    sustain: f32,
-    release: f32,
-    current_amplitude: f32,
-    state: EnvelopeState,
-    sample_rate: f32,
-    // Precalcular valores para evitar divisiones en cada muestra
+    pub sample_rate: f32,
+    pub state: EnvelopeState,
+    pub current_level: f32,
+    pub attack_time: f32,
+    pub decay_time: f32,
+    pub sustain_level: f32,
+    pub release_time: f32,
+    pub velocity: f32,
     attack_increment: f32,
-    decay_decrement: f32,
-    release_decrement: f32,
+    decay_increment: f32,
+    release_increment: f32,
 }
 
 impl Envelope {
-    #[inline]
     pub fn new(sample_rate: f32) -> Self {
-        let attack = 0.005;
-        let decay = 0.05;
-        let sustain = 0.7;
-        let release = 0.05;
-        
-        // Precalcular incrementos/decrementos
-        let attack_increment = 1.0 / (attack * sample_rate);
-        let decay_decrement = (1.0 - sustain) / (decay * sample_rate);
-        let release_decrement = sustain / (release * sample_rate);
-        
-        Envelope {
-            attack,
-            decay,
-            sustain,
-            release,
-            current_amplitude: 0.0,
-            state: EnvelopeState::Off,
+        Self {
             sample_rate,
-            attack_increment,
-            decay_decrement,
-            release_decrement,
+            state: EnvelopeState::Idle,
+            current_level: 0.0,
+            attack_time: 0.01,
+            decay_time: 0.1,
+            sustain_level: 0.7,
+            release_time: 0.3,
+            velocity: 1.0,
+            attack_increment: 0.0,
+            decay_increment: 0.0,
+            release_increment: 0.0,
         }
     }
 
-    #[inline]
-    pub fn next_sample(&mut self) -> f32 {
-        match self.state {
-            EnvelopeState::Attack => {
-                self.current_amplitude += self.attack_increment;
-                if self.current_amplitude >= 1.0 {
-                    self.current_amplitude = 1.0;
-                    self.state = EnvelopeState::Decay;
-                }
-            }
-            EnvelopeState::Decay => {
-                self.current_amplitude -= self.decay_decrement;
-                if self.current_amplitude <= self.sustain {
-                    self.current_amplitude = self.sustain;
-                    self.state = EnvelopeState::Sustain;
-                }
-            }
-            EnvelopeState::Sustain => {
-                // Mantener el nivel de sustain
-            }
-            EnvelopeState::Release => {
-                self.current_amplitude -= self.release_decrement;
-                if self.current_amplitude <= 0.0 {
-                    self.current_amplitude = 0.0;
-                    self.state = EnvelopeState::Off;
-                }
-            }
-            EnvelopeState::Off => {
-                self.current_amplitude = 0.0;
-            }
-        }
-        self.current_amplitude
+    pub fn set_adsr(&mut self, attack: f32, decay: f32, sustain: f32, release: f32) {
+        self.attack_time = attack;
+        self.decay_time = decay;
+        self.sustain_level = sustain;
+        self.release_time = release;
+        self.recalculate_increments();
     }
 
-    #[inline]
+    pub fn set_velocity(&mut self, velocity: f32) {
+        self.velocity = velocity;
+        self.recalculate_increments();
+    }
+
+    fn recalculate_increments(&mut self) {
+        self.attack_increment = 1.0 / (self.attack_time * self.sample_rate);
+        self.decay_increment = (1.0 - self.sustain_level) / (self.decay_time * self.sample_rate);
+        self.release_increment = self.sustain_level / (self.release_time * self.sample_rate);
+    }
+
     pub fn note_on(&mut self) {
         self.state = EnvelopeState::Attack;
+        self.recalculate_increments();
     }
 
-    #[inline]
     pub fn note_off(&mut self) {
-        self.state = EnvelopeState::Release;
+        if self.state != EnvelopeState::Idle {
+            self.state = EnvelopeState::Release;
+        }
     }
 
-    #[inline]
+    pub fn next_sample(&mut self) -> f32 {
+        match self.state {
+            EnvelopeState::Idle => 0.0,
+            EnvelopeState::Attack => {
+                self.current_level += self.attack_increment;
+                if self.current_level >= 1.0 {
+                    self.current_level = 1.0;
+                    self.state = EnvelopeState::Decay;
+                }
+                self.current_level * self.velocity
+            }
+            EnvelopeState::Decay => {
+                self.current_level -= self.decay_increment;
+                if self.current_level <= self.sustain_level {
+                    self.current_level = self.sustain_level;
+                    self.state = EnvelopeState::Sustain;
+                }
+                self.current_level * self.velocity
+            }
+            EnvelopeState::Sustain => {
+                self.current_level * self.velocity
+            }
+            EnvelopeState::Release => {
+                self.current_level -= self.release_increment;
+                if self.current_level <= 0.0 {
+                    self.current_level = 0.0;
+                    self.state = EnvelopeState::Idle;
+                }
+                self.current_level * self.velocity
+            }
+        }
+    }
+
     pub fn is_finished(&self) -> bool {
-        self.state == EnvelopeState::Off
+        self.state == EnvelopeState::Idle
     }
 }

@@ -4,7 +4,7 @@ mod structs;
 mod gui;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use midir::MidiInput;
+use midir::{MidiInput, MidiInputConnection};
 use std::sync::Arc;
 use std::time::Duration;
 use std::collections::HashMap;
@@ -16,7 +16,7 @@ use crate::audio::soft_clip;
 use crate::midi::midi_note_to_freq;
 use crate::structs::envelope::Envelope;
 use crate::structs::note::Note;
-use crate::gui::{SynthApp, SynthConfig};
+use crate::gui::{SynthApp, SynthConfig, WaveType};
 
 fn main() {
     // Verificar si se debe usar la interfaz gráfica
@@ -65,6 +65,9 @@ fn run_console_version() {
     // Usar un Arc<Mutex<f32>> para la frecuencia de muestreo
     let sample_rate_shared = Arc::new(Mutex::new(44100.0f32));
     
+    // Tipo de onda compartido
+    let wave_type_shared = Arc::new(Mutex::new(WaveType::Sine));
+    
     // Configurar entrada MIDI
     let midi_in = MidiInput::new("rust-synth").unwrap();
     let ports = midi_in.ports();
@@ -76,6 +79,7 @@ fn run_console_version() {
 
     let notes_for_audio = active_notes.clone();
     let sample_rate_for_midi = sample_rate_shared.clone();
+    let wave_type_for_midi = wave_type_shared.clone();
 
     // Listar hosts de audio disponibles
     println!("\nHosts de audio disponibles:");
@@ -115,16 +119,18 @@ fn run_console_version() {
         if message.len() == 3 {
             let mut notes = active_notes.lock().unwrap();
             let current_sample_rate = *sample_rate_for_midi.lock().unwrap();
+            let current_wave_type = *wave_type_for_midi.lock().unwrap();
             
             match message[0] {
                 0x90 => { // Note On
                     let note = message[1];
-                    let velocity = message[2];
-                    if velocity > 0 {
+                    let velocity = message[2] as f32 / 127.0;
+                    if velocity > 0.0 {
                         let freq = midi_note_to_freq(note);
                         let mut envelope = Envelope::new(current_sample_rate);
-                        envelope.note_on();
-                        notes.insert(note, Note::new(freq, envelope, current_sample_rate));
+                        envelope.set_adsr(0.01, 0.1, 0.7, 0.3);
+                        envelope.set_velocity(velocity);
+                        notes.insert(note, Note::new(freq, envelope, current_sample_rate, current_wave_type));
                     } else {
                         if let Some(note_data) = notes.get_mut(&note) {
                             note_data.envelope.note_off();
@@ -258,7 +264,7 @@ fn run_console_version() {
                 for note in notes_guard.values_mut() {
                     if note.sample_rate != current_sample_rate {
                         note.sample_rate = current_sample_rate;
-                        note.oscillator.set_frequency(note.frequency, current_sample_rate);
+                        note.update_frequency(note.frequency);
                     }
                 }
                 
@@ -311,7 +317,7 @@ fn run_console_version() {
                 for note in notes_guard.values_mut() {
                     if note.sample_rate != current_sample_rate {
                         note.sample_rate = current_sample_rate;
-                        note.oscillator.set_frequency(note.frequency, current_sample_rate);
+                        note.update_frequency(note.frequency);
                     }
                 }
                 
@@ -376,4 +382,52 @@ fn run_console_version() {
     }
     
     println!("Saliendo...");
+}
+
+fn handle_midi_message(msg: &[u8], active_notes: Arc<Mutex<HashMap<u8, Note>>>, sample_rate: Arc<Mutex<f32>>, wave_type: Arc<Mutex<WaveType>>) {
+    match msg[0] & 0xF0 {
+        0x90 => { // Note On
+            let note = msg[1];
+            let velocity = msg[2] as f32 / 127.0;
+            if velocity > 0.0 {
+                let freq = midi_note_to_freq(note);
+                let mut envelope = Envelope::new(*sample_rate.lock().unwrap());
+                envelope.set_adsr(0.01, 0.1, 0.7, 0.3);
+                envelope.set_velocity(velocity);
+                let current_wave_type = *wave_type.lock().unwrap();
+                let new_note = Note::new(freq, envelope, *sample_rate.lock().unwrap(), current_wave_type);
+                active_notes.lock().unwrap().insert(note, new_note);
+            } else {
+                if let Some(note) = active_notes.lock().unwrap().get_mut(&note) {
+                    note.envelope.note_off();
+                }
+            }
+        },
+        0x80 => { // Note Off
+            let note = msg[1];
+            if let Some(note) = active_notes.lock().unwrap().get_mut(&note) {
+                note.envelope.note_off();
+            }
+        },
+        _ => (),
+    }
+}
+
+fn connect_midi(active_notes: Arc<Mutex<HashMap<u8, Note>>>, sample_rate: Arc<Mutex<f32>>, wave_type: Arc<Mutex<WaveType>>) -> Option<MidiInputConnection<()>> {
+    let midi_in = MidiInput::new("rust-synth").ok()?;
+    let ports = midi_in.ports();
+    let port = ports.get(0)?;
+
+    let notes = active_notes.clone();
+    let sr = sample_rate.clone();
+    let wt = wave_type.clone();
+    
+    midi_in.connect(
+        port,
+        "rust-synth",
+        move |_stamp, message, _| {
+            handle_midi_message(message, notes.clone(), sr.clone(), wt.clone());
+        },
+        (),
+    ).ok()
 }

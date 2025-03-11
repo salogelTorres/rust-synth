@@ -9,6 +9,25 @@ use crate::midi::midi_note_to_freq;
 use crate::structs::envelope::Envelope;
 use crate::structs::note::Note;
 
+#[derive(Clone, Copy, PartialEq)]
+pub enum WaveType {
+    Sine,
+    Square,
+    Triangle,
+    Sawtooth,
+}
+
+impl WaveType {
+    fn as_str(&self) -> &'static str {
+        match self {
+            WaveType::Sine => "Senoidal",
+            WaveType::Square => "Cuadrada",
+            WaveType::Triangle => "Triangular",
+            WaveType::Sawtooth => "Sierra",
+        }
+    }
+}
+
 // Estructura para almacenar la configuración del sintetizador
 pub struct SynthConfig {
     pub host_index: usize,
@@ -20,6 +39,7 @@ pub struct SynthConfig {
     pub selected_config: Option<cpal::SupportedStreamConfig>,
     pub running: bool,
     pub volume: Arc<Mutex<f32>>,
+    pub wave_type: Arc<Mutex<WaveType>>,
 }
 
 impl Default for SynthConfig {
@@ -34,6 +54,7 @@ impl Default for SynthConfig {
             selected_config: None,
             running: false,
             volume: Arc::new(Mutex::new(0.15)),
+            wave_type: Arc::new(Mutex::new(WaveType::Sine)),
         }
     }
 }
@@ -225,6 +246,8 @@ impl SynthApp {
     }
     
     fn start_synth(&mut self) {
+        println!("Iniciando sintetizador...");
+        
         // Obtener la configuración actual
         let config_clone;
         let host_index;
@@ -234,6 +257,7 @@ impl SynthApp {
         {
             let config = self.config.lock().unwrap();
             if config.selected_config.is_none() {
+                println!("Error: No hay configuración de audio seleccionada");
                 return;
             }
             config_clone = config.selected_config.clone();
@@ -245,26 +269,31 @@ impl SynthApp {
         // Obtener el host seleccionado
         let available_hosts = cpal::available_hosts();
         if host_index >= available_hosts.len() {
+            println!("Error: Índice de host inválido");
             return;
         }
         
         let host_id = available_hosts[host_index];
         let host = cpal::host_from_id(host_id).expect("Error al crear el host");
+        println!("Host de audio: {}", host.id().name());
         
         // Obtener dispositivos de salida disponibles
         let output_devices = host.output_devices().expect("Error al obtener dispositivos de salida");
         let devices: Vec<Device> = output_devices.collect();
         
         if device_index >= devices.len() || devices.is_empty() {
+            println!("Error: No hay dispositivos de salida disponibles");
             return;
         }
         
         // Obtener el dispositivo seleccionado
         let device = &devices[device_index];
+        println!("Dispositivo de salida: {}", device.name().unwrap_or_else(|_| "Desconocido".into()));
         
         // Obtener la configuración seleccionada
         let supported_config = config_clone.unwrap();
         let sample_format = supported_config.sample_format();
+        println!("Formato de muestra: {:?}", sample_format);
         
         // Crear configuración de stream
         let stream_config = cpal::StreamConfig {
@@ -276,6 +305,10 @@ impl SynthApp {
                 cpal::BufferSize::Fixed(512)
             },
         };
+        println!("Configuración del stream:");
+        println!("  Canales: {}", stream_config.channels);
+        println!("  Frecuencia de muestreo: {} Hz", stream_config.sample_rate.0);
+        println!("  Tamaño del buffer: {:?}", stream_config.buffer_size);
         
         // Clonar referencias para el callback
         let active_notes = self.active_notes.clone();
@@ -298,7 +331,7 @@ impl SynthApp {
                     for note in notes_guard.values_mut() {
                         if note.sample_rate != current_sample_rate {
                             note.sample_rate = current_sample_rate;
-                            note.oscillator.set_frequency(note.frequency, current_sample_rate);
+                            note.update_frequency(note.frequency);
                         }
                     }
                     
@@ -352,7 +385,7 @@ impl SynthApp {
                     for note in notes_guard.values_mut() {
                         if note.sample_rate != current_sample_rate {
                             note.sample_rate = current_sample_rate;
-                            note.oscillator.set_frequency(note.frequency, current_sample_rate);
+                            note.update_frequency(note.frequency);
                         }
                     }
                     
@@ -425,29 +458,41 @@ impl SynthApp {
         let ports = midi_in.ports();
         
         if ports.is_empty() {
+            println!("No se encontraron puertos MIDI disponibles");
             return;
+        }
+        
+        println!("Puertos MIDI disponibles:");
+        for (i, port) in ports.iter().enumerate() {
+            println!("  {}: {}", i, midi_in.port_name(port).unwrap_or_else(|_| "Puerto desconocido".into()));
         }
         
         // Clonar referencias para el callback
         let active_notes = self.active_notes.clone();
         let sample_rate_for_midi = self.sample_rate.clone();
+        let wave_type = self.config.lock().unwrap().wave_type.clone();
         
         // Conectar al primer puerto MIDI disponible
         let midi_connection = midi_in.connect(&ports[0], "midi-read", move |_timestamp, message, _| {
             if message.len() == 3 {
                 let mut notes = active_notes.lock().unwrap();
                 let current_sample_rate = *sample_rate_for_midi.lock().unwrap();
+                let current_wave_type = *wave_type.lock().unwrap();
                 
                 match message[0] {
                     0x90 => { // Note On
                         let note = message[1];
-                        let velocity = message[2];
-                        if velocity > 0 {
+                        let velocity = message[2] as f32 / 127.0;
+                        if velocity > 0.0 {
                             let freq = midi_note_to_freq(note);
+                            println!("Nota ON - Número: {}, Frecuencia: {:.2} Hz, Velocidad: {:.2}", note, freq, velocity);
                             let mut envelope = Envelope::new(current_sample_rate);
-                            envelope.note_on();
-                            notes.insert(note, Note::new(freq, envelope, current_sample_rate));
+                            envelope.set_adsr(0.01, 0.1, 0.7, 0.3);
+                            envelope.set_velocity(velocity);
+                            envelope.note_on(); // Asegurarse de que la envolvente se inicie
+                            notes.insert(note, Note::new(freq, envelope, current_sample_rate, current_wave_type));
                         } else {
+                            println!("Nota OFF (velocity 0) - Número: {}", note);
                             if let Some(note_data) = notes.get_mut(&note) {
                                 note_data.envelope.note_off();
                             }
@@ -455,6 +500,7 @@ impl SynthApp {
                     },
                     0x80 => { // Note Off
                         let note = message[1];
+                        println!("Nota OFF - Número: {}", note);
                         if let Some(note_data) = notes.get_mut(&note) {
                             note_data.envelope.note_off();
                         }
@@ -463,6 +509,8 @@ impl SynthApp {
                 }
             }
         }, ()).unwrap();
+        
+        println!("Conexión MIDI establecida");
         
         // Guardar la conexión MIDI
         self.midi_connection = Some(midi_connection);
@@ -494,6 +542,7 @@ impl eframe::App for SynthApp {
                 let device_text;
                 let rate_text;
                 let volume;
+                let wave_type;
                 let available_hosts;
                 let available_devices;
                 let available_sample_rates;
@@ -511,6 +560,7 @@ impl eframe::App for SynthApp {
                         .map(|rate| format!("{} Hz", rate))
                         .unwrap_or_else(|| "Ninguna".to_string());
                     volume = config.volume.clone();
+                    wave_type = config.wave_type.clone();
                     
                     // Clonar las colecciones para evitar problemas de préstamo
                     available_hosts = config.available_hosts.clone();
@@ -595,51 +645,69 @@ impl eframe::App for SynthApp {
             
             ui.add_space(10.0);
             
-            // Control de volumen en su propia sección
+            // Control de volumen y forma de onda en una sección separada
             ui.group(|ui| {
-                ui.heading("Control de Volumen");
-                ui.add_space(5.0);
-                
-                let volume_lock = self.config.lock().unwrap().volume.clone();
-                let current_volume = *volume_lock.lock().unwrap();
-                
-                ui.vertical_centered(|ui| {
-                    let desired_size = egui::vec2(100.0, 100.0);
-                    let response = ui.allocate_response(desired_size, egui::Sense::drag());
-                    let painter = ui.painter_at(response.rect);
-                    
-                    if response.dragged() {
-                        let delta = response.drag_delta();
-                        let mut new_volume = current_volume - delta.y * 0.01;
-                        new_volume = new_volume.clamp(0.0, 1.0);
-                        *volume_lock.lock().unwrap() = new_volume;
-                    }
-                    
-                    // Dibujar el knob
-                    let center = response.rect.center();
-                    let radius = (response.rect.width() / 2.0).min(response.rect.height() / 2.0) - 4.0;
-                    
-                    // Dibujar el círculo base
-                    painter.circle_filled(
-                        center,
-                        radius,
-                        egui::Color32::from_gray(32),
-                    );
-                    
-                    // Dibujar el indicador
-                    let angle = std::f32::consts::PI * (0.75 + current_volume * 1.5);
-                    let indicator_pos = egui::pos2(
-                        center.x + radius * angle.cos(),
-                        center.y + radius * angle.sin(),
-                    );
-                    
-                    painter.line_segment(
-                        [center, indicator_pos],
-                        egui::Stroke::new(2.0, egui::Color32::WHITE),
-                    );
-                    
-                    ui.add_space(5.0);
-                    ui.label(format!("{}%", (current_volume * 100.0) as i32));
+                ui.heading("Controles de Sonido");
+                ui.horizontal(|ui| {
+                    // Control de volumen
+                    ui.vertical(|ui| {
+                        ui.label("Volumen");
+                        let mut volume_value = *self.config.lock().unwrap().volume.lock().unwrap();
+                        let volume_response = ui.add(egui::widgets::Slider::new(&mut volume_value, 0.0..=1.0)
+                            .show_value(true)
+                            .text(""));
+                        if volume_response.changed() {
+                            *self.config.lock().unwrap().volume.lock().unwrap() = volume_value;
+                            println!("Volumen: {}", volume_value);
+                        }
+                    });
+
+                    ui.add_space(20.0);
+
+                    // Control de tipo de onda con botones visuales
+                    ui.vertical(|ui| {
+                        ui.label("Tipo de Onda");
+                        ui.horizontal(|ui| {
+                            let button_size = egui::vec2(50.0, 50.0);
+                            let mut current_wave = *self.config.lock().unwrap().wave_type.lock().unwrap();
+                            
+                            // Botón Sine
+                            let sine_response = ui.add(egui::Button::new("")
+                                .min_size(button_size)
+                                .selected(current_wave == WaveType::Sine));
+                            if sine_response.clicked() {
+                                *self.config.lock().unwrap().wave_type.lock().unwrap() = WaveType::Sine;
+                            }
+                            draw_sine_wave(ui.painter(), sine_response.rect, current_wave == WaveType::Sine);
+
+                            // Botón Square
+                            let square_response = ui.add(egui::Button::new("")
+                                .min_size(button_size)
+                                .selected(current_wave == WaveType::Square));
+                            if square_response.clicked() {
+                                *self.config.lock().unwrap().wave_type.lock().unwrap() = WaveType::Square;
+                            }
+                            draw_square_wave(ui.painter(), square_response.rect, current_wave == WaveType::Square);
+
+                            // Botón Triangle
+                            let triangle_response = ui.add(egui::Button::new("")
+                                .min_size(button_size)
+                                .selected(current_wave == WaveType::Triangle));
+                            if triangle_response.clicked() {
+                                *self.config.lock().unwrap().wave_type.lock().unwrap() = WaveType::Triangle;
+                            }
+                            draw_triangle_wave(ui.painter(), triangle_response.rect, current_wave == WaveType::Triangle);
+
+                            // Botón Sawtooth
+                            let saw_response = ui.add(egui::Button::new("")
+                                .min_size(button_size)
+                                .selected(current_wave == WaveType::Sawtooth));
+                            if saw_response.clicked() {
+                                *self.config.lock().unwrap().wave_type.lock().unwrap() = WaveType::Sawtooth;
+                            }
+                            draw_sawtooth_wave(ui.painter(), saw_response.rect, current_wave == WaveType::Sawtooth);
+                        });
+                    });
                 });
             });
             
@@ -717,4 +785,58 @@ impl eframe::App for SynthApp {
         // Solicitar repintado continuo para actualizar el estado
         ctx.request_repaint();
     }
+}
+
+fn draw_sine_wave(painter: &egui::Painter, rect: egui::Rect, selected: bool) {
+    let color = if selected { egui::Color32::WHITE } else { egui::Color32::GRAY };
+    let stroke = egui::Stroke::new(2.0, color);
+    let mut points = Vec::new();
+    let width = rect.width();
+    let height = rect.height();
+    let center_y = rect.center().y;
+    
+    for i in 0..=20 {
+        let x = rect.left() + (i as f32 * width / 20.0);
+        let y = center_y + (i as f32 * std::f32::consts::TAU / 20.0).sin() * height * 0.3;
+        points.push(egui::pos2(x, y));
+    }
+    painter.add(egui::Shape::line(points, stroke));
+}
+
+fn draw_square_wave(painter: &egui::Painter, rect: egui::Rect, selected: bool) {
+    let color = if selected { egui::Color32::WHITE } else { egui::Color32::GRAY };
+    let stroke = egui::Stroke::new(2.0, color);
+    let points = vec![
+        egui::pos2(rect.left(), rect.center().y + rect.height() * 0.3),
+        egui::pos2(rect.left() + rect.width() * 0.25, rect.center().y + rect.height() * 0.3),
+        egui::pos2(rect.left() + rect.width() * 0.25, rect.center().y - rect.height() * 0.3),
+        egui::pos2(rect.left() + rect.width() * 0.75, rect.center().y - rect.height() * 0.3),
+        egui::pos2(rect.left() + rect.width() * 0.75, rect.center().y + rect.height() * 0.3),
+        egui::pos2(rect.right(), rect.center().y + rect.height() * 0.3),
+    ];
+    painter.add(egui::Shape::line(points, stroke));
+}
+
+fn draw_triangle_wave(painter: &egui::Painter, rect: egui::Rect, selected: bool) {
+    let color = if selected { egui::Color32::WHITE } else { egui::Color32::GRAY };
+    let stroke = egui::Stroke::new(2.0, color);
+    let points = vec![
+        egui::pos2(rect.left(), rect.center().y),
+        egui::pos2(rect.left() + rect.width() * 0.25, rect.center().y - rect.height() * 0.3),
+        egui::pos2(rect.left() + rect.width() * 0.75, rect.center().y + rect.height() * 0.3),
+        egui::pos2(rect.right(), rect.center().y),
+    ];
+    painter.add(egui::Shape::line(points, stroke));
+}
+
+fn draw_sawtooth_wave(painter: &egui::Painter, rect: egui::Rect, selected: bool) {
+    let color = if selected { egui::Color32::WHITE } else { egui::Color32::GRAY };
+    let stroke = egui::Stroke::new(2.0, color);
+    let points = vec![
+        egui::pos2(rect.left(), rect.center().y + rect.height() * 0.3),
+        egui::pos2(rect.left() + rect.width() * 0.5, rect.center().y - rect.height() * 0.3),
+        egui::pos2(rect.left() + rect.width() * 0.5, rect.center().y + rect.height() * 0.3),
+        egui::pos2(rect.right(), rect.center().y - rect.height() * 0.3),
+    ];
+    painter.add(egui::Shape::line(points, stroke));
 } 
