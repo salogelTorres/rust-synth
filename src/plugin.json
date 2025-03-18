@@ -1,0 +1,52 @@
+{
+    "name": "Rust Synth",
+    "vendor": "Your Name",
+    "version": "1.0.0",
+    "type": "instrument",
+    "sub_type": "synth",
+    "parameters": [
+        {
+            "name": "Wave Type",
+            "id": 0,
+            "type": "enum",
+            "values": [
+                "Sine",
+                "Square",
+                "Triangle",
+                "Sawtooth"
+            ]
+        },
+        {
+            "name": "Attack",
+            "id": 1,
+            "type": "float",
+            "min": 0.001,
+            "max": 2.0,
+            "default": 0.01
+        },
+        {
+            "name": "Decay",
+            "id": 2,
+            "type": "float",
+            "min": 0.001,
+            "max": 2.0,
+            "default": 0.1
+        },
+        {
+            "name": "Sustain",
+            "id": 3,
+            "type": "float",
+            "min": 0.0,
+            "max": 1.0,
+            "default": 0.7
+        },
+        {
+            "name": "Release",
+            "id": 4,
+            "type": "float",
+            "min": 0.001,
+            "max": 5.0,
+            "default": 0.3
+        }
+    ]
+}

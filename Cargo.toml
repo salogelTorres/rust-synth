@@ -3,16 +3,27 @@ name = "rust-synth"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+crate-type = ["cdylib"]
+name = "rust_synth"
+
+[[bin]]
+name = "rust-synth-standalone"
+path = "src/main.rs"
+
 [dependencies]
-ctrlc = "3.4.1"
-midir = "0.9.1"
-cpal = { version = "0.15.2", features = ["asio"] }
-fundsp = "0.13.0"
-asio-sys = "0.2.2"
-eframe = { version = "0.24.0", features = ["persistence"] }
-egui = "0.24.0"
-egui_extras = "0.24.0"
-rfd = "0.12.0"
+vst3-sys = "0.1"
+vst3-com = "0.1"
+vst3-host = "0.1"
+vst3-plugin = { version = "0.1", features = ["host-bundle"] }
+cpal = "0.15"
+midir = "0.9"
+egui = "0.26"
+eframe = "0.26"
+ctrlc = "3.4"
+
+[workspace]
+members = ["."]
 
 [dependencies.winapi]
 version = "0.3.9"
@@ -22,3 +33,5 @@ features = ["winuser", "windef"]
 opt-level = 3
 lto = true
 codegen-units = 1
+strip = true
+panic = "abort"
